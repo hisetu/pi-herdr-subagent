@@ -1,0 +1,15 @@
+{
+  "name": "pi-herdr-subagent",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Visible herdr-based pane subagents for pi",
+  "keywords": ["pi-package"],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./index.ts"],
+    "skills": ["./skills"]
+  }
+}

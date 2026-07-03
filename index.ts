@@ -1,0 +1,477 @@
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { execFile } from "node:child_process";
+import { promises as fs } from "node:fs";
+import { dirname, join } from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+const STATE_TYPE = "herdr-subagents-state";
+const MAX_TASKS = 4;
+const DEFAULT_WAIT_TIMEOUT_MS = 300000;
+const DEFAULT_LINES = 30;
+const SESSION_DIR = "/Users/lucas/.pi/agent/extensions/herdr-subagents/sessions";
+
+type Role = "research" | "implement";
+type Thinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
+type SubagentPane = {
+  paneId: string;
+  role: Role;
+  task: string;
+  cwd: string;
+  createdAt: number;
+  sessionPath?: string;
+  model?: string;
+  thinking?: Thinking;
+};
+
+type PersistedState = {
+  agents: SubagentPane[];
+};
+
+type PaneInfo = {
+  pane_id: string;
+  agent?: string;
+  agent_status?: string;
+  cwd?: string;
+  foreground_cwd?: string;
+  focused?: boolean;
+  workspace_id?: string;
+  tab_id?: string;
+};
+
+type HerdrPaneListResult = {
+  result?: {
+    panes?: PaneInfo[];
+  };
+};
+
+const spawnParams = Type.Object({
+  tasks: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: MAX_TASKS, description: `Tasks to run in parallel (max ${MAX_TASKS})` }),
+  role: Type.Optional(Type.Union([Type.Literal("research"), Type.Literal("implement")], { description: "Subagent role" })),
+  model: Type.Optional(Type.String({ description: "Optional pi model override" })),
+  thinking: Type.Optional(Type.Union([
+    Type.Literal("off"),
+    Type.Literal("minimal"),
+    Type.Literal("low"),
+    Type.Literal("medium"),
+    Type.Literal("high"),
+    Type.Literal("xhigh"),
+  ], { description: "Thinking level override" })),
+  cwd: Type.Optional(Type.String({ description: "Working directory for spawned panes" })),
+});
+
+const statusParams = Type.Object({
+  includeDone: Type.Optional(Type.Boolean({ description: "Include done panes" })),
+});
+
+const collectParams = Type.Object({
+  wait: Type.Optional(Type.Boolean({ description: "Wait until all spawned panes are idle or done" })),
+  lines: Type.Optional(Type.Number({ minimum: 5, maximum: 200, description: "How many recent lines to read per pane" })),
+  timeoutMs: Type.Optional(Type.Number({ minimum: 1000, maximum: 1800000, description: "Wait timeout in milliseconds" })),
+});
+
+function insideHerdr(): boolean {
+  return process.env.HERDR_ENV === "1" && Boolean(process.env.HERDR_PANE_ID);
+}
+
+function requireHerdr() {
+  if (!insideHerdr()) {
+    throw new Error("This extension only works inside a herdr-managed pane (HERDR_ENV=1).");
+  }
+}
+
+function buildPrompt(role: Role, task: string): string {
+  const shared = [
+    "You are a subagent working under a supervisor in herdr.",
+    "Stay narrowly scoped to the assigned task.",
+    "Be concise and practical.",
+  ];
+
+  if (role === "implement") {
+    return [
+      ...shared,
+      "Your role is implementation.",
+      "Make only the minimum necessary changes.",
+      "When finished, output exactly these headings:",
+      "Changed files:",
+      "Summary:",
+      "Risks:",
+      "",
+      `Task: ${task}`,
+    ].join("\n");
+  }
+
+  return [
+    ...shared,
+    "Your role is research.",
+    "Do not implement changes unless explicitly asked.",
+    "When finished, output exactly these headings:",
+    "Conclusion:",
+    "Evidence:",
+    "Unknowns:",
+    "",
+    `Task: ${task}`,
+  ].join("\n");
+}
+
+async function runHerdr(args: string[]): Promise<string> {
+  const { stdout, stderr } = await execFileAsync("herdr", args, { maxBuffer: 1024 * 1024 * 4 });
+  if (stderr?.trim()) {
+    // herdr often writes useful json to stdout even when stderr is empty; ignore stderr noise here
+  }
+  return stdout;
+}
+
+async function listPanes(): Promise<PaneInfo[]> {
+  const stdout = await runHerdr(["pane", "list"]);
+  const parsed = JSON.parse(stdout) as HerdrPaneListResult;
+  return parsed.result?.panes ?? [];
+}
+
+async function splitPane(sourcePaneId: string, cwd?: string): Promise<string> {
+  const args = ["pane", "split", sourcePaneId, "--direction", "right", "--no-focus"];
+  if (cwd) args.push("--cwd", cwd);
+  const stdout = await runHerdr(args);
+  const parsed = JSON.parse(stdout) as { result?: { pane?: { pane_id?: string } } };
+  const paneId = parsed.result?.pane?.pane_id;
+  if (!paneId) throw new Error("Failed to parse new pane id from herdr pane split output.");
+  return paneId;
+}
+
+async function paneRun(paneId: string, command: string): Promise<void> {
+  await runHerdr(["pane", "run", paneId, command]);
+}
+
+async function paneRead(paneId: string, lines: number): Promise<string> {
+  return runHerdr(["pane", "read", paneId, "--source", "recent-unwrapped", "--lines", String(lines)]);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function buildPiCommand(role: Role, task: string, sessionPath: string, model?: string, thinking?: Thinking): string {
+  const prompt = buildPrompt(role, task);
+  const parts = ["pi", "--session", shellQuote(sessionPath)];
+  if (model) parts.push("--model", shellQuote(model));
+  if (thinking) parts.push("--thinking", shellQuote(thinking));
+  parts.push(shellQuote(prompt));
+  return parts.join(" ");
+}
+
+function formatStatusLine(agent: SubagentPane, live?: PaneInfo): string {
+  const status = live?.agent_status ?? "missing";
+  return `- ${agent.paneId} [${status}] (${agent.role}) ${agent.task}`;
+}
+
+function clip(text: string, max = 500): string {
+  const compact = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-8).join("\n");
+  return compact.length > max ? `${compact.slice(0, max)}…` : compact;
+}
+
+function isStructuredHeader(line: string, header: string): boolean {
+  const normalized = line.trim().toLowerCase();
+  return normalized === header
+    || normalized === `${header}:`
+    || normalized === `1. ${header}`
+    || normalized === `1. ${header}:`
+    || normalized === `2. ${header}`
+    || normalized === `2. ${header}:`
+    || normalized === `3. ${header}`
+    || normalized === `3. ${header}:`;
+}
+
+function extractStructuredSummary(role: Role, text: string): string | undefined {
+  const lines = text.split(/\r?\n/).map((line) => line.trim());
+  const headers = role === "implement"
+    ? ["changed files", "summary", "risks"]
+    : ["conclusion", "evidence", "unknowns"];
+
+  const matches: string[] = [];
+  for (const header of headers) {
+    const idx = lines.findIndex((line) => isStructuredHeader(line, header));
+    if (idx === -1) continue;
+
+    const block: string[] = [];
+    for (let i = idx; i < lines.length; i += 1) {
+      const current = lines[i];
+      if (!current) {
+        if (block.length > 0) break;
+        continue;
+      }
+      if (i > idx && headers.some((other) => isStructuredHeader(current, other))) {
+        break;
+      }
+      block.push(current);
+    }
+    if (block.length > 0) {
+      matches.push(block.join("\n"));
+    }
+  }
+
+  if (matches.length === 0) return undefined;
+  return matches.join("\n\n");
+}
+
+function persistState(pi: ExtensionAPI, agents: SubagentPane[]) {
+  pi.appendEntry<PersistedState>(STATE_TYPE, { agents });
+}
+
+function restoreState(ctx: ExtensionContext): SubagentPane[] {
+  const branch = ctx.sessionManager.getBranch();
+  let last: SubagentPane[] = [];
+  for (const entry of branch) {
+    if (entry.type === "custom" && entry.customType === STATE_TYPE) {
+      const data = entry.data as PersistedState | undefined;
+      if (Array.isArray(data?.agents)) {
+        last = data.agents;
+      }
+    }
+  }
+  return last;
+}
+
+function makeSessionPath(): string {
+  const id = `${new Date().toISOString().replace(/[:.]/g, "-")}_${Math.random().toString(16).slice(2, 10)}`;
+  return join(SESSION_DIR, `${id}.jsonl`);
+}
+
+async function extractAssistantTextFromSession(sessionPath: string): Promise<string | undefined> {
+  try {
+    const raw = await fs.readFile(sessionPath, "utf8");
+    const lines = raw.split(/\r?\n/).filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const entry = JSON.parse(lines[i]) as { type?: string; message?: { role?: string; content?: Array<{ type?: string; text?: string }> } };
+      if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+      const text = (entry.message.content ?? [])
+        .filter((part) => part?.type === "text" && typeof part.text === "string")
+        .map((part) => part.text ?? "")
+        .join("\n")
+        .trim();
+      if (text) return text;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+async function waitForAgents(targetPaneIds: string[], timeoutMs: number): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const panes = await listPanes();
+    const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
+    const pending = targetPaneIds.filter((paneId) => {
+      const status = byId.get(paneId)?.agent_status;
+      if (status == null) return false;
+      return status !== "idle" && status !== "done";
+    });
+    if (pending.length === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  throw new Error(`Timed out waiting for panes to settle after ${timeoutMs}ms.`);
+}
+
+export default function herdrSubagentsExtension(pi: ExtensionAPI) {
+  let agents: SubagentPane[] = [];
+
+  const refreshFromSession = (ctx: ExtensionContext) => {
+    agents = restoreState(ctx);
+  };
+
+  const pruneMissingAgents = async (): Promise<void> => {
+    if (agents.length === 0) return;
+    const panes = await listPanes();
+    const livePaneIds = new Set(panes.map((pane) => pane.pane_id));
+    const nextAgents = agents.filter((agent) => livePaneIds.has(agent.paneId));
+    if (nextAgents.length !== agents.length) {
+      agents = nextAgents;
+      persistState(pi, agents);
+    }
+  };
+
+  pi.on("session_start", async (_event, ctx) => {
+    refreshFromSession(ctx);
+  });
+
+  pi.on("session_tree", async (_event, ctx) => {
+    refreshFromSession(ctx);
+  });
+
+  pi.on("resources_discover", async () => ({
+    skillPaths: ["/Users/lucas/.pi/agent/extensions/herdr-subagents/skills"],
+  }));
+
+  pi.registerTool({
+    name: "herdr_subagents_spawn",
+    label: "Herdr Spawn",
+    description: "Spawn simple herdr-based subagents in sibling panes.",
+    promptSnippet: "Spawn herdr-based subagents in separate panes for parallel research or implementation tasks.",
+    promptGuidelines: [
+      "Use herdr_subagents_spawn when the user wants visible pane-based subagents in herdr.",
+      "Use herdr_subagents_status to inspect spawned pane status before reporting progress.",
+      "Use herdr_subagents_collect to gather results after spawned panes finish.",
+    ],
+    parameters: spawnParams,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      requireHerdr();
+      if (params.tasks.length > MAX_TASKS) {
+        throw new Error(`Too many tasks. Maximum is ${MAX_TASKS}.`);
+      }
+      const role: Role = params.role ?? "research";
+      const cwd = params.cwd ?? ctx.cwd;
+      const sourcePane = process.env.HERDR_PANE_ID as string;
+      const created: SubagentPane[] = [];
+
+      await fs.mkdir(SESSION_DIR, { recursive: true });
+
+      for (const task of params.tasks) {
+        const paneId = await splitPane(sourcePane, cwd);
+        const sessionPath = makeSessionPath();
+        await fs.mkdir(dirname(sessionPath), { recursive: true });
+        const command = buildPiCommand(role, task, sessionPath, params.model, params.thinking);
+        await paneRun(paneId, command);
+        created.push({
+          paneId,
+          role,
+          task,
+          cwd,
+          createdAt: Date.now(),
+          sessionPath,
+          model: params.model,
+          thinking: params.thinking,
+        });
+      }
+
+      agents = [...agents, ...created];
+      persistState(pi, agents);
+
+      const text = [
+        `Spawned ${created.length} herdr subagent pane(s).`,
+        ...created.map((agent) => formatStatusLine(agent)),
+      ].join("\n");
+
+      return {
+        content: [{ type: "text", text }],
+        details: { agents: created },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "herdr_subagents_status",
+    label: "Herdr Status",
+    description: "Show current herdr-based subagent panes tracked by this session.",
+    parameters: statusParams,
+    async execute(_toolCallId, params) {
+      requireHerdr();
+      await pruneMissingAgents();
+      const panes = await listPanes();
+      const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
+      const rows = agents
+        .map((agent) => ({ agent, live: byId.get(agent.paneId) }))
+        .filter(({ live }) => params.includeDone || live?.agent_status !== "done");
+
+      if (rows.length === 0) {
+        return {
+          content: [{ type: "text", text: "No tracked herdr subagents in this session." }],
+          details: { agents: [] },
+        };
+      }
+
+      const text = rows.map(({ agent, live }) => formatStatusLine(agent, live)).join("\n");
+      return {
+        content: [{ type: "text", text }],
+        details: {
+          agents: rows.map(({ agent, live }) => ({ ...agent, status: live?.agent_status ?? "missing" })),
+        },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "herdr_subagents_collect",
+    label: "Herdr Collect",
+    description: "Collect recent output from tracked herdr-based subagent panes.",
+    parameters: collectParams,
+    async execute(_toolCallId, params) {
+      requireHerdr();
+      await pruneMissingAgents();
+      if (agents.length === 0) {
+        return {
+          content: [{ type: "text", text: "No tracked herdr subagents to collect from." }],
+          details: { agents: [] },
+        };
+      }
+
+      const timeoutMs = params.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+      const lines = params.lines ?? DEFAULT_LINES;
+      if (params.wait) {
+        await waitForAgents(agents.map((agent) => agent.paneId), timeoutMs);
+      }
+
+      const panes = await listPanes();
+      const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
+      const summaries = [] as Array<Record<string, unknown>>;
+      const textBlocks: string[] = [];
+
+      for (const agent of agents) {
+        const sessionText = agent.sessionPath ? await extractAssistantTextFromSession(agent.sessionPath) : undefined;
+        const output = sessionText ?? await paneRead(agent.paneId, lines).catch(() => "");
+        const excerpt = extractStructuredSummary(agent.role, output) ?? clip(output || "(no readable recent output)");
+        const status = byId.get(agent.paneId)?.agent_status ?? "missing";
+        summaries.push({ ...agent, status, excerpt });
+        textBlocks.push([`## ${agent.paneId} [${status}] (${agent.role})`, `Task: ${agent.task}`, excerpt].join("\n"));
+      }
+
+      return {
+        content: [{ type: "text", text: textBlocks.join("\n\n") }],
+        details: { agents: summaries },
+      };
+    },
+  });
+
+  pi.registerCommand("herdr-subagents-status", {
+    description: "Show tracked herdr subagent panes",
+    handler: async (_args, ctx) => {
+      if (!insideHerdr()) {
+        ctx.ui.notify("Not running inside herdr.", "error");
+        return;
+      }
+      await pruneMissingAgents();
+      const panes = await listPanes();
+      const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
+      const lines = agents.length
+        ? agents.map((agent) => formatStatusLine(agent, byId.get(agent.paneId)))
+        : ["No tracked herdr subagents in this session."];
+      ctx.ui.notify(lines.join("\n"), "info");
+    },
+  });
+
+  pi.registerCommand("herdr-subagents-collect", {
+    description: "Collect recent output from tracked herdr subagent panes",
+    handler: async (args, ctx) => {
+      if (!insideHerdr()) {
+        ctx.ui.notify("Not running inside herdr.", "error");
+        return;
+      }
+      await pruneMissingAgents();
+      const wait = args.trim() === "wait";
+      if (wait) {
+        await waitForAgents(agents.map((agent) => agent.paneId), DEFAULT_WAIT_TIMEOUT_MS).catch((error) => {
+          ctx.ui.notify(String(error), "warning");
+        });
+      }
+      const blocks: string[] = [];
+      for (const agent of agents) {
+        const sessionText = agent.sessionPath ? await extractAssistantTextFromSession(agent.sessionPath) : undefined;
+        const output = sessionText ?? await paneRead(agent.paneId, DEFAULT_LINES).catch(() => "");
+        const excerpt = extractStructuredSummary(agent.role, output) ?? clip(output || "(no readable recent output)");
+        blocks.push(`${agent.paneId} (${agent.role}) ${agent.task}\n${excerpt}`);
+      }
+      ctx.ui.notify(blocks.join("\n\n") || "No tracked herdr subagents.", "info");
+    },
+  });
+}
