@@ -21,6 +21,7 @@ type SubagentPane = {
   task: string;
   cwd: string;
   createdAt: number;
+  batchId: string;
   sessionPath?: string;
   model?: string;
   thinking?: Thinking;
@@ -64,12 +65,19 @@ const spawnParams = Type.Object({
 
 const statusParams = Type.Object({
   includeDone: Type.Optional(Type.Boolean({ description: "Include done panes" })),
+  latestOnly: Type.Optional(Type.Boolean({ description: "Show only the most recent spawned batch" })),
 });
 
 const collectParams = Type.Object({
   wait: Type.Optional(Type.Boolean({ description: "Wait until all spawned panes are idle or done" })),
   lines: Type.Optional(Type.Number({ minimum: 5, maximum: 200, description: "How many recent lines to read per pane" })),
   timeoutMs: Type.Optional(Type.Number({ minimum: 1000, maximum: 1800000, description: "Wait timeout in milliseconds" })),
+  latestOnly: Type.Optional(Type.Boolean({ description: "Collect only the most recent spawned batch" })),
+});
+
+const clearParams = Type.Object({
+  closePanes: Type.Optional(Type.Boolean({ description: "Close tracked panes before clearing them" })),
+  latestOnly: Type.Optional(Type.Boolean({ description: "Clear only the most recent spawned batch" })),
 });
 
 function insideHerdr(): boolean {
@@ -146,6 +154,10 @@ async function paneRun(paneId: string, command: string): Promise<void> {
 
 async function paneRead(paneId: string, lines: number): Promise<string> {
   return runHerdr(["pane", "read", paneId, "--source", "recent-unwrapped", "--lines", String(lines)]);
+}
+
+async function paneClose(paneId: string): Promise<void> {
+  await runHerdr(["pane", "close", paneId]);
 }
 
 function shellQuote(value: string): string {
@@ -238,6 +250,24 @@ function makeSessionPath(): string {
   return join(SESSION_DIR, `${id}.jsonl`);
 }
 
+function makeBatchId(): string {
+  return `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function getLatestBatchId(list: SubagentPane[]): string | undefined {
+  let latest: SubagentPane | undefined;
+  for (const agent of list) {
+    if (!latest || agent.createdAt > latest.createdAt) latest = agent;
+  }
+  return latest?.batchId;
+}
+
+function filterAgentsByBatch(list: SubagentPane[], latestOnly?: boolean): SubagentPane[] {
+  if (!latestOnly) return list;
+  const latestBatchId = getLatestBatchId(list);
+  return latestBatchId ? list.filter((agent) => agent.batchId === latestBatchId) : list;
+}
+
 async function extractAssistantTextFromSession(sessionPath: string): Promise<string | undefined> {
   try {
     const raw = await fs.readFile(sessionPath, "utf8");
@@ -324,6 +354,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       const cwd = params.cwd ?? ctx.cwd;
       const sourcePane = process.env.HERDR_PANE_ID as string;
       const created: SubagentPane[] = [];
+      const batchId = makeBatchId();
 
       await fs.mkdir(SESSION_DIR, { recursive: true });
 
@@ -339,6 +370,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           task,
           cwd,
           createdAt: Date.now(),
+          batchId,
           sessionPath,
           model: params.model,
           thinking: params.thinking,
@@ -368,9 +400,10 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       requireHerdr();
       await pruneMissingAgents();
+      const visibleAgents = filterAgentsByBatch(agents, params.latestOnly);
       const panes = await listPanes();
       const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
-      const rows = agents
+      const rows = visibleAgents
         .map((agent) => ({ agent, live: byId.get(agent.paneId) }))
         .filter(({ live }) => params.includeDone || live?.agent_status !== "done");
 
@@ -399,7 +432,8 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       requireHerdr();
       await pruneMissingAgents();
-      if (agents.length === 0) {
+      const targetAgents = filterAgentsByBatch(agents, params.latestOnly);
+      if (targetAgents.length === 0) {
         return {
           content: [{ type: "text", text: "No tracked herdr subagents to collect from." }],
           details: { agents: [] },
@@ -409,7 +443,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       const timeoutMs = params.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
       const lines = params.lines ?? DEFAULT_LINES;
       if (params.wait) {
-        await waitForAgents(agents.map((agent) => agent.paneId), timeoutMs);
+        await waitForAgents(targetAgents.map((agent) => agent.paneId), timeoutMs);
       }
 
       const panes = await listPanes();
@@ -417,7 +451,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       const summaries = [] as Array<Record<string, unknown>>;
       const textBlocks: string[] = [];
 
-      for (const agent of agents) {
+      for (const agent of targetAgents) {
         const sessionText = agent.sessionPath ? await extractAssistantTextFromSession(agent.sessionPath) : undefined;
         const output = sessionText ?? await paneRead(agent.paneId, lines).catch(() => "");
         const excerpt = extractStructuredSummary(agent.role, output) ?? clip(output || "(no readable recent output)");
@@ -429,6 +463,39 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: textBlocks.join("\n\n") }],
         details: { agents: summaries },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "herdr_subagents_clear",
+    label: "Herdr Clear",
+    description: "Clear tracked herdr-based subagent panes and optionally close them.",
+    parameters: clearParams,
+    async execute(_toolCallId, params) {
+      requireHerdr();
+      await pruneMissingAgents();
+      const targetAgents = filterAgentsByBatch(agents, params.latestOnly);
+      if (targetAgents.length === 0) {
+        return {
+          content: [{ type: "text", text: "No tracked herdr subagents to clear." }],
+          details: { cleared: [], remaining: agents },
+        };
+      }
+
+      if (params.closePanes) {
+        for (const agent of targetAgents) {
+          await paneClose(agent.paneId).catch(() => undefined);
+        }
+      }
+
+      const clearedIds = new Set(targetAgents.map((agent) => agent.paneId));
+      agents = agents.filter((agent) => !clearedIds.has(agent.paneId));
+      persistState(pi, agents);
+
+      return {
+        content: [{ type: "text", text: `Cleared ${targetAgents.length} tracked herdr subagent(s).` }],
+        details: { cleared: targetAgents, remaining: agents },
       };
     },
   });
@@ -472,6 +539,31 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
         blocks.push(`${agent.paneId} (${agent.role}) ${agent.task}\n${excerpt}`);
       }
       ctx.ui.notify(blocks.join("\n\n") || "No tracked herdr subagents.", "info");
+    },
+  });
+
+  pi.registerCommand("herdr-subagents-clear", {
+    description: "Clear tracked herdr subagent panes (append 'close' to also close panes)",
+    handler: async (args, ctx) => {
+      if (!insideHerdr()) {
+        ctx.ui.notify("Not running inside herdr.", "error");
+        return;
+      }
+      await pruneMissingAgents();
+      const closePanes = args.trim() === "close";
+      const targetAgents = [...agents];
+      if (targetAgents.length === 0) {
+        ctx.ui.notify("No tracked herdr subagents.", "info");
+        return;
+      }
+      if (closePanes) {
+        for (const agent of targetAgents) {
+          await paneClose(agent.paneId).catch(() => undefined);
+        }
+      }
+      agents = [];
+      persistState(pi, agents);
+      ctx.ui.notify(`Cleared ${targetAgents.length} tracked herdr subagent(s).`, "info");
     },
   });
 }

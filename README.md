@@ -11,6 +11,7 @@ It adds three tools:
 - `herdr_subagents_spawn`
 - `herdr_subagents_status`
 - `herdr_subagents_collect`
+- `herdr_subagents_clear`
 
 It also bundles a `herdr-subagents` skill for supervisor-style pane orchestration.
 
@@ -87,6 +88,7 @@ Show tracked subagent panes for the current session.
 Parameters:
 
 - `includeDone?: boolean`
+- `latestOnly?: boolean` — show only the newest spawned batch
 
 Example:
 
@@ -105,6 +107,7 @@ Parameters:
 - `wait?: boolean` — wait until panes settle to `idle` / `done`
 - `lines?: number` — fallback pane-read line count
 - `timeoutMs?: number`
+- `latestOnly?: boolean` — collect only the newest spawned batch
 
 Example:
 
@@ -113,6 +116,24 @@ Example:
   "wait": true,
   "lines": 60,
   "timeoutMs": 180000
+}
+```
+
+### `herdr_subagents_clear`
+
+Clear tracked subagent panes and optionally close them.
+
+Parameters:
+
+- `closePanes?: boolean`
+- `latestOnly?: boolean`
+
+Example:
+
+```json
+{
+  "closePanes": true,
+  "latestOnly": true
 }
 ```
 
@@ -153,7 +174,8 @@ Expected output shape:
 2. Call `herdr_subagents_spawn`
 3. Check progress with `herdr_subagents_status`
 4. Collect results with `herdr_subagents_collect`
-5. Synthesize the final answer in the supervisor pane
+5. Clear finished tracked panes with `herdr_subagents_clear` when appropriate
+6. Synthesize the final answer in the supervisor pane
 
 ## Example workflow
 
@@ -176,6 +198,7 @@ Use `wait: true` if you want to gather results only after all workers settle.
 - First version uses **one shared role per spawn call**
 - Collection prefers reading the spawned subagent's **session output**, then falls back to pane output if needed
 - Missing panes are automatically pruned from tracked state
+- Use `latestOnly: true` when you only want the newest spawned batch
 
 ## Future ideas
 

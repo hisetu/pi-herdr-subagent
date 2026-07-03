@@ -30,6 +30,7 @@ use this when:
 - `herdr_subagents_spawn`
 - `herdr_subagents_status`
 - `herdr_subagents_collect`
+- `herdr_subagents_clear`
 
 ## role guidance
 
@@ -64,7 +65,8 @@ expected result shape:
 2. spawn panes with `herdr_subagents_spawn`
 3. inspect progress with `herdr_subagents_status`
 4. collect outputs with `herdr_subagents_collect`
-5. synthesize the final answer in the supervisor pane
+5. clear finished tracked panes with `herdr_subagents_clear` when you no longer need them
+6. synthesize the final answer in the supervisor pane
 
 ## examples
 
@@ -82,3 +84,9 @@ do not use this when:
 - the task is tiny and does not benefit from parallelism
 - the user does not care about visible pane-by-pane progress
 - the work is highly coupled and requires constant shared context
+
+## practical tips
+
+- use `latestOnly: true` when you only want the newest spawned batch
+- use `herdr_subagents_clear` to avoid stale tracked panes building up over time
+- use `closePanes: true` when you want to close worker panes as part of cleanup
