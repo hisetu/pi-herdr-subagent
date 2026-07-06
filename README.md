@@ -193,6 +193,12 @@ Expected output shape:
 - `Evidence:`
 - `Unknowns:`
 
+Research workers are also instructed to:
+
+- keep scope narrow
+- stop once they have enough evidence
+- fall back quickly if one tool path fails
+
 ### `implement`
 
 Best for:
