@@ -29,6 +29,7 @@ use this when:
 
 - `herdr_subagents_spawn`
 - `herdr_subagents_status`
+- `herdr_subagents_global_status`
 - `herdr_subagents_collect`
 - `herdr_subagents_interrupt`
 - `herdr_subagents_clear`
@@ -65,11 +66,12 @@ expected result shape:
 1. split the work into a few narrow tasks
 2. spawn panes with `herdr_subagents_spawn`
 3. inspect progress with `herdr_subagents_status`
-4. collect outputs with `herdr_subagents_collect`
-5. use the built-in lightweight synthesis to quickly scan combined findings and unknowns
-6. interrupt a stuck pane with `herdr_subagents_interrupt` if needed
-7. clear finished tracked panes with `herdr_subagents_clear` when you no longer need them
-8. synthesize the final answer in the supervisor pane when more refinement is needed
+4. use `herdr_subagents_global_status` if you need a rough workspace-wide view beyond the current session
+5. collect outputs with `herdr_subagents_collect`
+6. use the built-in lightweight synthesis to quickly scan combined findings and unknowns
+7. interrupt a stuck pane with `herdr_subagents_interrupt` if needed
+8. clear finished tracked panes with `herdr_subagents_clear` when you no longer need them
+9. synthesize the final answer in the supervisor pane when more refinement is needed
 
 ## examples
 

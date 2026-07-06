@@ -99,6 +99,11 @@ const interruptParams = Type.Object({
   latestOnly: Type.Optional(Type.Boolean({ description: "Interrupt only the most recent spawned batch" })),
 });
 
+const globalStatusParams = Type.Object({
+  lines: Type.Optional(Type.Number({ minimum: 10, maximum: 200, description: "How many recent lines to inspect per pane" })),
+  includeAllPiPanes: Type.Optional(Type.Boolean({ description: "Include all pi panes even if they do not look like subagents" })),
+});
+
 function insideHerdr(): boolean {
   return process.env.HERDR_ENV === "1" && Boolean(process.env.HERDR_PANE_ID);
 }
@@ -298,6 +303,28 @@ function firstMeaningfulLine(text: string | undefined): string | undefined {
   const head = lines[0].replace(/:$/, "");
   const next = lines[1];
   return next ? `${head}: ${next}` : lines[0];
+}
+
+function extractTaskLine(text: string): string | undefined {
+  const lines = text.split(/\r?\n/);
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line.startsWith("Task:")) return line.slice(5).trim();
+  }
+  return undefined;
+}
+
+function detectRoleFromOutput(text: string): Role | undefined {
+  const normalized = text.toLowerCase();
+  if (normalized.includes("your role is research.")) return "research";
+  if (normalized.includes("your role is implementation.")) return "implement";
+  return undefined;
+}
+
+function looksLikeSubagentOutput(text: string): boolean {
+  return text.includes("You are a subagent working under a supervisor in herdr.")
+    || text.includes("Conclusion:")
+    || text.includes("Changed files:");
 }
 
 function buildCollectSynthesis(items: Array<{ paneId: string; role: Role; task: string; sections: Partial<Record<string, string>>; excerpt: string; status: string }>): string | undefined {
@@ -632,6 +659,54 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "herdr_subagents_global_status",
+    label: "Herdr Global Status",
+    description: "Inspect likely herdr-based subagent panes in the current workspace, even outside this session's tracked state.",
+    parameters: globalStatusParams,
+    async execute(_toolCallId, params) {
+      requireHerdr();
+      const lines = params.lines ?? 40;
+      const panes = await listPanes();
+      const rows: Array<{ paneId: string; status: string; cwd: string; role?: Role; task?: string; looksLikeSubagent: boolean }> = [];
+
+      for (const pane of panes) {
+        if (pane.agent !== "pi") continue;
+        const output = await paneRead(pane.pane_id, lines).catch(() => "");
+        const role = detectRoleFromOutput(output);
+        const task = extractTaskLine(output);
+        const looksLikeSubagent = looksLikeSubagentOutput(output) || Boolean(role) || Boolean(task);
+        if (!looksLikeSubagent && !params.includeAllPiPanes) continue;
+        rows.push({
+          paneId: pane.pane_id,
+          status: pane.agent_status ?? "unknown",
+          cwd: pane.foreground_cwd ?? pane.cwd ?? "",
+          role,
+          task,
+          looksLikeSubagent,
+        });
+      }
+
+      if (rows.length === 0) {
+        return {
+          content: [{ type: "text", text: "No likely herdr subagent panes found in the current workspace." }],
+          details: { panes: [] },
+        };
+      }
+
+      const text = rows.map((row) => {
+        const roleText = row.role ? ` (${row.role})` : "";
+        const taskText = row.task ? ` ${row.task}` : "";
+        return `- ${row.paneId} [${row.status}]${roleText}${taskText}`;
+      }).join("\n");
+
+      return {
+        content: [{ type: "text", text }],
+        details: { panes: rows },
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "herdr_subagents_interrupt",
     label: "Herdr Interrupt",
     description: "Interrupt tracked herdr-based subagent panes.",
@@ -693,6 +768,28 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
         content: [{ type: "text", text: `Cleared ${targetAgents.length} tracked herdr subagent(s).` }],
         details: { cleared: targetAgents, remaining: agents },
       };
+    },
+  });
+
+  pi.registerCommand("herdr-subagents-global-status", {
+    description: "Show likely herdr subagent panes in the current workspace",
+    handler: async (_args, ctx) => {
+      if (!insideHerdr()) {
+        ctx.ui.notify("Not running inside herdr.", "error");
+        return;
+      }
+      const panes = await listPanes();
+      const lines: string[] = [];
+      for (const pane of panes) {
+        if (pane.agent !== "pi") continue;
+        const output = await paneRead(pane.pane_id, 30).catch(() => "");
+        const role = detectRoleFromOutput(output);
+        const task = extractTaskLine(output);
+        const looksLikeSubagent = looksLikeSubagentOutput(output) || Boolean(role) || Boolean(task);
+        if (!looksLikeSubagent) continue;
+        lines.push(`- ${pane.pane_id} [${pane.agent_status ?? "unknown"}]${role ? ` (${role})` : ""}${task ? ` ${task}` : ""}`);
+      }
+      ctx.ui.notify(lines.join("\n") || "No likely herdr subagent panes found in the current workspace.", "info");
     },
   });
 

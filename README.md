@@ -10,6 +10,7 @@ It adds three tools:
 
 - `herdr_subagents_spawn`
 - `herdr_subagents_status`
+- `herdr_subagents_global_status`
 - `herdr_subagents_collect`
 - `herdr_subagents_interrupt`
 - `herdr_subagents_clear`
@@ -112,6 +113,23 @@ Example:
 ```json
 {
   "includeDone": true
+}
+```
+
+### `herdr_subagents_global_status`
+
+Inspect likely subagent panes in the current herdr workspace, even outside the current session's tracked state.
+
+Parameters:
+
+- `lines?: number`
+- `includeAllPiPanes?: boolean`
+
+Example:
+
+```json
+{
+  "lines": 40
 }
 ```
 
@@ -309,6 +327,7 @@ Expected result:
 ## Notes
 
 - This package only works inside herdr-managed panes
+- Use `herdr_subagents_global_status` when you are in a different supervisor/session and still want a rough workspace-wide subagent overview
 - First version supports either **one shared role per spawn call** or **per-task role overrides**
 - Collection prefers reading the spawned subagent's **session output**, then falls back to pane output if needed
 - Missing panes are automatically pruned from tracked state
