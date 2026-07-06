@@ -30,6 +30,7 @@ use this when:
 - `herdr_subagents_spawn`
 - `herdr_subagents_status`
 - `herdr_subagents_collect`
+- `herdr_subagents_interrupt`
 - `herdr_subagents_clear`
 
 ## role guidance
@@ -66,8 +67,9 @@ expected result shape:
 3. inspect progress with `herdr_subagents_status`
 4. collect outputs with `herdr_subagents_collect`
 5. use the built-in lightweight synthesis to quickly scan combined findings and unknowns
-6. clear finished tracked panes with `herdr_subagents_clear` when you no longer need them
-7. synthesize the final answer in the supervisor pane when more refinement is needed
+6. interrupt a stuck pane with `herdr_subagents_interrupt` if needed
+7. clear finished tracked panes with `herdr_subagents_clear` when you no longer need them
+8. synthesize the final answer in the supervisor pane when more refinement is needed
 
 ## examples
 
@@ -90,5 +92,6 @@ do not use this when:
 
 - use `latestOnly: true` when you only want the newest spawned batch
 - use per-task roles when one batch mixes investigation and implementation
+- use `herdr_subagents_interrupt` if one worker looks stuck
 - use `herdr_subagents_clear` to avoid stale tracked panes building up over time
 - use `closePanes: true` when you want to close worker panes as part of cleanup

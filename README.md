@@ -11,6 +11,7 @@ It adds three tools:
 - `herdr_subagents_spawn`
 - `herdr_subagents_status`
 - `herdr_subagents_collect`
+- `herdr_subagents_interrupt`
 - `herdr_subagents_clear`
 
 It also bundles a `herdr-subagents` skill for supervisor-style pane orchestration.
@@ -32,6 +33,7 @@ This is especially useful when the user wants to **see what each subagent is doi
 - Track subagent status by pane
 - Collect structured results from subagent sessions
 - Add a lightweight supervisor synthesis on top of per-pane results
+- Support lightweight completion notifications when tracked panes finish
 - Keep the first version simple with only two roles:
   - `research`
   - `implement`
@@ -139,6 +141,23 @@ Example:
 }
 ```
 
+### `herdr_subagents_interrupt`
+
+Interrupt tracked subagent panes.
+
+Parameters:
+
+- `paneId?: string`
+- `latestOnly?: boolean`
+
+Example:
+
+```json
+{
+  "latestOnly": true
+}
+```
+
 ### `herdr_subagents_clear`
 
 Clear tracked subagent panes and optionally close them.
@@ -195,8 +214,9 @@ Expected output shape:
 3. Check progress with `herdr_subagents_status`
 4. Collect results with `herdr_subagents_collect`
 5. Use the built-in lightweight synthesis as a quick supervisor summary
-6. Clear finished tracked panes with `herdr_subagents_clear` when appropriate
-7. Synthesize the final answer in the supervisor pane if more refinement is needed
+6. Interrupt a stuck pane with `herdr_subagents_interrupt` if needed
+7. Clear finished tracked panes with `herdr_subagents_clear` when appropriate
+8. Synthesize the final answer in the supervisor pane if more refinement is needed
 
 ## Example workflow
 
@@ -285,6 +305,7 @@ Expected result:
 - Collection prefers reading the spawned subagent's **session output**, then falls back to pane output if needed
 - Missing panes are automatically pruned from tracked state
 - Use `latestOnly: true` when you only want the newest spawned batch
+- The extension shows a lightweight notify when a tracked pane transitions into `idle` or `done`
 
 ## Future ideas
 

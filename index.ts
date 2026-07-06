@@ -93,6 +93,11 @@ const clearParams = Type.Object({
   latestOnly: Type.Optional(Type.Boolean({ description: "Clear only the most recent spawned batch" })),
 });
 
+const interruptParams = Type.Object({
+  paneId: Type.Optional(Type.String({ description: "Interrupt one tracked pane by pane id" })),
+  latestOnly: Type.Optional(Type.Boolean({ description: "Interrupt only the most recent spawned batch" })),
+});
+
 function insideHerdr(): boolean {
   return process.env.HERDR_ENV === "1" && Boolean(process.env.HERDR_PANE_ID);
 }
@@ -180,6 +185,10 @@ async function paneRead(paneId: string, lines: number): Promise<string> {
 
 async function paneClose(paneId: string): Promise<void> {
   await runHerdr(["pane", "close", paneId]);
+}
+
+async function paneSendKeys(paneId: string, keys: string): Promise<void> {
+  await runHerdr(["pane", "send-keys", paneId, keys]);
 }
 
 function shellQuote(value: string): string {
@@ -381,6 +390,8 @@ async function waitForAgents(targetPaneIds: string[], timeoutMs: number): Promis
 
 export default function herdrSubagentsExtension(pi: ExtensionAPI) {
   let agents: SubagentPane[] = [];
+  let statusPollTimer: NodeJS.Timeout | undefined;
+  const lastKnownStatuses = new Map<string, string>();
 
   const refreshFromSession = (ctx: ExtensionContext) => {
     agents = restoreState(ctx);
@@ -397,12 +408,50 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
     }
   };
 
+  const stopStatusPolling = () => {
+    if (statusPollTimer) {
+      clearInterval(statusPollTimer);
+      statusPollTimer = undefined;
+    }
+  };
+
+  const pollStatusesOnce = async (ctx: ExtensionContext) => {
+    if (!insideHerdr() || agents.length === 0) return;
+    await pruneMissingAgents();
+    if (agents.length === 0) return;
+    const panes = await listPanes();
+    const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
+    for (const agent of agents) {
+      const status = byId.get(agent.paneId)?.agent_status;
+      if (!status) continue;
+      const previous = lastKnownStatuses.get(agent.paneId);
+      lastKnownStatuses.set(agent.paneId, status);
+      const becameDone = (status === "idle" || status === "done") && previous && previous !== status && previous !== "idle" && previous !== "done";
+      if (becameDone) {
+        ctx.ui.notify(`Subagent done: ${agent.paneId} (${agent.role}) ${agent.task}`, "info");
+      }
+    }
+  };
+
+  const startStatusPolling = (ctx: ExtensionContext) => {
+    stopStatusPolling();
+    statusPollTimer = setInterval(() => {
+      void pollStatusesOnce(ctx).catch(() => undefined);
+    }, 3000);
+  };
+
   pi.on("session_start", async (_event, ctx) => {
     refreshFromSession(ctx);
+    startStatusPolling(ctx);
   });
 
   pi.on("session_tree", async (_event, ctx) => {
     refreshFromSession(ctx);
+    startStatusPolling(ctx);
+  });
+
+  pi.on("session_shutdown", async () => {
+    stopStatusPolling();
   });
 
   pi.on("resources_discover", async () => ({
@@ -550,6 +599,38 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "herdr_subagents_interrupt",
+    label: "Herdr Interrupt",
+    description: "Interrupt tracked herdr-based subagent panes.",
+    parameters: interruptParams,
+    async execute(_toolCallId, params) {
+      requireHerdr();
+      await pruneMissingAgents();
+      let targetAgents = filterAgentsByBatch(agents, params.latestOnly);
+      if (params.paneId) {
+        targetAgents = targetAgents.filter((agent) => agent.paneId === params.paneId);
+      }
+      if (targetAgents.length === 0) {
+        return {
+          content: [{ type: "text", text: "No tracked herdr subagents matched the interrupt request." }],
+          details: { interrupted: [] },
+        };
+      }
+
+      for (const agent of targetAgents) {
+        await paneSendKeys(agent.paneId, "Escape").catch(async () => {
+          await paneSendKeys(agent.paneId, "C-c").catch(() => undefined);
+        });
+      }
+
+      return {
+        content: [{ type: "text", text: `Interrupted ${targetAgents.length} tracked herdr subagent(s).` }],
+        details: { interrupted: targetAgents },
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "herdr_subagents_clear",
     label: "Herdr Clear",
     description: "Clear tracked herdr-based subagent panes and optionally close them.",
@@ -621,6 +702,29 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
         blocks.push(`${agent.paneId} (${agent.role}) ${agent.task}\n${excerpt}`);
       }
       ctx.ui.notify(blocks.join("\n\n") || "No tracked herdr subagents.", "info");
+    },
+  });
+
+  pi.registerCommand("herdr-subagents-interrupt", {
+    description: "Interrupt tracked herdr subagent panes (or one pane id)",
+    handler: async (args, ctx) => {
+      if (!insideHerdr()) {
+        ctx.ui.notify("Not running inside herdr.", "error");
+        return;
+      }
+      await pruneMissingAgents();
+      const paneId = args.trim() || undefined;
+      let targetAgents = paneId ? agents.filter((agent) => agent.paneId === paneId) : agents;
+      if (targetAgents.length === 0) {
+        ctx.ui.notify("No tracked herdr subagents matched the interrupt request.", "info");
+        return;
+      }
+      for (const agent of targetAgents) {
+        await paneSendKeys(agent.paneId, "Escape").catch(async () => {
+          await paneSendKeys(agent.paneId, "C-c").catch(() => undefined);
+        });
+      }
+      ctx.ui.notify(`Interrupted ${targetAgents.length} tracked herdr subagent(s).`, "info");
     },
   });
 
