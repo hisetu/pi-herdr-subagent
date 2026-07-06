@@ -145,6 +145,8 @@ function buildPrompt(role: Role, task: string): string {
     "Do not implement changes unless explicitly asked.",
     "Keep the scope narrow and answer only the assigned question.",
     "Use the fastest sufficient path.",
+    "Do not use codegraph_status as a research starting step.",
+    "Prefer codegraph_explore, codegraph_search, or codegraph_files first when CodeGraph is useful.",
     "If your first tool choice fails or is unavailable, immediately fall back to another tool and continue.",
     "Do not spend time repeatedly retrying broken tooling.",
     "Stop as soon as you have enough evidence for a concise answer.",
