@@ -454,10 +454,6 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
     stopStatusPolling();
   });
 
-  pi.on("resources_discover", async () => ({
-    skillPaths: ["/Users/lucas/.pi/agent/extensions/herdr-subagents/skills"],
-  }));
-
   pi.registerTool({
     name: "herdr_subagents_spawn",
     label: "Herdr Spawn",
