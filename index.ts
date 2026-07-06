@@ -27,6 +27,7 @@ type SubagentPane = {
   cwd: string;
   createdAt: number;
   batchId: string;
+  supervisorPaneId: string;
   sessionPath?: string;
   model?: string;
   thinking?: Thinking;
@@ -194,6 +195,18 @@ async function paneClose(paneId: string): Promise<void> {
 
 async function paneSendKeys(paneId: string, keys: string): Promise<void> {
   await runHerdr(["pane", "send-keys", paneId, keys]);
+}
+
+function encodeNotifyPayload(payload: Record<string, string>): string {
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
+}
+
+function decodeNotifyPayload(encoded: string): Record<string, string> | undefined {
+  try {
+    return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as Record<string, string>;
+  } catch {
+    return undefined;
+  }
 }
 
 function shellQuote(value: string): string {
@@ -433,7 +446,20 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       lastKnownStatuses.set(agent.paneId, status);
       const becameDone = (status === "idle" || status === "done") && previous && previous !== status && previous !== "idle" && previous !== "done";
       if (becameDone) {
-        ctx.ui.notify(`Subagent done: ${agent.paneId} (${agent.role}) ${agent.task}`, "info");
+        const message = `Subagent done: ${agent.paneId} (${agent.role}) ${agent.task}`;
+        if (agent.supervisorPaneId && agent.supervisorPaneId !== process.env.HERDR_PANE_ID) {
+          const payload = encodeNotifyPayload({
+            paneId: agent.paneId,
+            role: agent.role,
+            task: agent.task,
+            status,
+          });
+          await paneRun(agent.supervisorPaneId, `/herdr-subagents-done ${payload}`).catch(() => {
+            ctx.ui.notify(message, "info");
+          });
+        } else {
+          ctx.ui.notify(message, "info");
+        }
       }
     }
   };
@@ -497,6 +523,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           cwd,
           createdAt: Date.now(),
           batchId,
+          supervisorPaneId: sourcePane,
           sessionPath,
           model: params.model,
           thinking: params.thinking,
@@ -661,6 +688,18 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
         content: [{ type: "text", text: `Cleared ${targetAgents.length} tracked herdr subagent(s).` }],
         details: { cleared: targetAgents, remaining: agents },
       };
+    },
+  });
+
+  pi.registerCommand("herdr-subagents-done", {
+    description: "Internal command used by subagent completion notifications",
+    handler: async (args, ctx) => {
+      const payload = decodeNotifyPayload(args.trim());
+      if (!payload) return;
+      const paneId = payload.paneId ?? "unknown";
+      const role = payload.role ?? "subagent";
+      const task = payload.task ?? "(no task)";
+      ctx.ui.notify(`Subagent done: ${paneId} (${role}) ${task}`, "info");
     },
   });
 

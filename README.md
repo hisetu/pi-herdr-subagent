@@ -33,7 +33,7 @@ This is especially useful when the user wants to **see what each subagent is doi
 - Track subagent status by pane
 - Collect structured results from subagent sessions
 - Add a lightweight supervisor synthesis on top of per-pane results
-- Support lightweight completion notifications when tracked panes finish
+- Support lightweight completion notifications routed back to the supervisor pane when tracked panes finish
 - Keep the first version simple with only two roles:
   - `research`
   - `implement`
@@ -311,7 +311,7 @@ Expected result:
 - Collection prefers reading the spawned subagent's **session output**, then falls back to pane output if needed
 - Missing panes are automatically pruned from tracked state
 - Use `latestOnly: true` when you only want the newest spawned batch
-- The extension shows a lightweight notify when a tracked pane transitions into `idle` or `done`
+- The extension sends a lightweight completion notify back to the supervisor pane when a tracked pane transitions into `idle` or `done`
 
 ## Future ideas
 
