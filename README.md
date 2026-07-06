@@ -34,6 +34,7 @@ This is especially useful when the user wants to **see what each subagent is doi
 - Keep the first version simple with only two roles:
   - `research`
   - `implement`
+- Support either one shared default role or per-task role overrides
 
 ## Requirements
 
@@ -61,8 +62,8 @@ Spawn a few visible subagents in sibling panes.
 
 Parameters:
 
-- `tasks: string[]` — 1 to 4 task prompts
-- `role?: "research" | "implement"` — default `research`
+- `tasks: Array<string | { task: string; role?: "research" | "implement" }>` — 1 to 4 task prompts
+- `role?: "research" | "implement"` — default role fallback when a task does not specify its own role
 - `model?: string` — optional pi model override
 - `thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh"`
 - `cwd?: string` — working directory for spawned panes
@@ -76,6 +77,19 @@ Example:
     "Inspect where ssid is generated and consumed in the Android app."
   ],
   "role": "research",
+  "thinking": "minimal",
+  "cwd": "/Users/lucas"
+}
+```
+
+Mixed-role example:
+
+```json
+{
+  "tasks": [
+    { "task": "Inspect auth token flow in the Postman collection.", "role": "research" },
+    { "task": "Fix one focused Compose state bug in the Android app.", "role": "implement" }
+  ],
   "thinking": "minimal",
   "cwd": "/Users/lucas"
 }
@@ -195,7 +209,7 @@ Use `wait: true` if you want to gather results only after all workers settle.
 ## Notes
 
 - This package only works inside herdr-managed panes
-- First version uses **one shared role per spawn call**
+- First version supports either **one shared role per spawn call** or **per-task role overrides**
 - Collection prefers reading the spawned subagent's **session output**, then falls back to pane output if needed
 - Missing panes are automatically pruned from tracked state
 - Use `latestOnly: true` when you only want the newest spawned batch

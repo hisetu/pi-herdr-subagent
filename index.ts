@@ -15,6 +15,11 @@ const SESSION_DIR = "/Users/lucas/.pi/agent/extensions/herdr-subagents/sessions"
 type Role = "research" | "implement";
 type Thinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
+type SpawnTask = {
+  task: string;
+  role?: Role;
+};
+
 type SubagentPane = {
   paneId: string;
   role: Role;
@@ -48,9 +53,17 @@ type HerdrPaneListResult = {
   };
 };
 
+const taskItemSchema = Type.Union([
+  Type.String({ minLength: 1 }),
+  Type.Object({
+    task: Type.String({ minLength: 1, description: "Task prompt" }),
+    role: Type.Optional(Type.Union([Type.Literal("research"), Type.Literal("implement")], { description: "Optional per-task role override" })),
+  }),
+]);
+
 const spawnParams = Type.Object({
-  tasks: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: MAX_TASKS, description: `Tasks to run in parallel (max ${MAX_TASKS})` }),
-  role: Type.Optional(Type.Union([Type.Literal("research"), Type.Literal("implement")], { description: "Subagent role" })),
+  tasks: Type.Array(taskItemSchema, { minItems: 1, maxItems: MAX_TASKS, description: `Tasks to run in parallel (max ${MAX_TASKS})` }),
+  role: Type.Optional(Type.Union([Type.Literal("research"), Type.Literal("implement")], { description: "Default subagent role" })),
   model: Type.Optional(Type.String({ description: "Optional pi model override" })),
   thinking: Type.Optional(Type.Union([
     Type.Literal("off"),
@@ -88,6 +101,15 @@ function requireHerdr() {
   if (!insideHerdr()) {
     throw new Error("This extension only works inside a herdr-managed pane (HERDR_ENV=1).");
   }
+}
+
+function normalizeSpawnTasks(tasks: Array<string | SpawnTask>, defaultRole: Role): Array<{ task: string; role: Role }> {
+  return tasks.map((item) => {
+    if (typeof item === "string") {
+      return { task: item, role: defaultRole };
+    }
+    return { task: item.task, role: item.role ?? defaultRole };
+  });
 }
 
 function buildPrompt(role: Role, task: string): string {
@@ -350,24 +372,25 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       if (params.tasks.length > MAX_TASKS) {
         throw new Error(`Too many tasks. Maximum is ${MAX_TASKS}.`);
       }
-      const role: Role = params.role ?? "research";
+      const defaultRole: Role = params.role ?? "research";
       const cwd = params.cwd ?? ctx.cwd;
       const sourcePane = process.env.HERDR_PANE_ID as string;
       const created: SubagentPane[] = [];
       const batchId = makeBatchId();
+      const normalizedTasks = normalizeSpawnTasks(params.tasks as Array<string | SpawnTask>, defaultRole);
 
       await fs.mkdir(SESSION_DIR, { recursive: true });
 
-      for (const task of params.tasks) {
+      for (const item of normalizedTasks) {
         const paneId = await splitPane(sourcePane, cwd);
         const sessionPath = makeSessionPath();
         await fs.mkdir(dirname(sessionPath), { recursive: true });
-        const command = buildPiCommand(role, task, sessionPath, params.model, params.thinking);
+        const command = buildPiCommand(item.role, item.task, sessionPath, params.model, params.thinking);
         await paneRun(paneId, command);
         created.push({
           paneId,
-          role,
-          task,
+          role: item.role,
+          task: item.task,
           cwd,
           createdAt: Date.now(),
           batchId,

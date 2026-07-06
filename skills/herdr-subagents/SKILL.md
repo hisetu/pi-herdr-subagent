@@ -22,8 +22,8 @@ use this when:
 
 - keep tasks narrowly scoped
 - prefer 2 to 4 panes max
-- use one shared role per spawn call: `research` or `implement`
 - prefer `research` unless code changes are clearly required
+- use a shared default role or set role per task when tasks differ
 
 ## available tools
 
@@ -74,9 +74,9 @@ spawn 2 research panes:
 - inspect auth token flow in the postman collection
 - inspect where ssid is generated and consumed in the android app
 
-spawn 2 implement panes:
-- fix one compose state bug
-- add a small helper test
+spawn mixed-role panes:
+- `research`: inspect auth token flow in the postman collection
+- `implement`: fix one compose state bug
 
 ## when not to use
 
@@ -88,5 +88,6 @@ do not use this when:
 ## practical tips
 
 - use `latestOnly: true` when you only want the newest spawned batch
+- use per-task roles when one batch mixes investigation and implementation
 - use `herdr_subagents_clear` to avoid stale tracked panes building up over time
 - use `closePanes: true` when you want to close worker panes as part of cleanup
