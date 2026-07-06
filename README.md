@@ -198,6 +198,8 @@ Research workers are also instructed to:
 - keep scope narrow
 - stop once they have enough evidence
 - fall back quickly if one tool path fails
+- avoid repeating tests/analyze when one passing run is already enough
+- keep a small tool-action budget before writing the answer
 
 ### `implement`
 
