@@ -217,13 +217,13 @@ function isStructuredHeader(line: string, header: string): boolean {
     || normalized === `3. ${header}:`;
 }
 
-function extractStructuredSummary(role: Role, text: string): string | undefined {
+function extractStructuredSections(role: Role, text: string): Partial<Record<string, string>> {
   const lines = text.split(/\r?\n/).map((line) => line.trim());
   const headers = role === "implement"
     ? ["changed files", "summary", "risks"]
     : ["conclusion", "evidence", "unknowns"];
 
-  const matches: string[] = [];
+  const result: Partial<Record<string, string>> = {};
   for (const header of headers) {
     const idx = lines.findIndex((line) => isStructuredHeader(line, header));
     if (idx === -1) continue;
@@ -241,12 +241,65 @@ function extractStructuredSummary(role: Role, text: string): string | undefined 
       block.push(current);
     }
     if (block.length > 0) {
-      matches.push(block.join("\n"));
+      result[header] = block.join("\n");
     }
   }
 
+  return result;
+}
+
+function extractStructuredSummary(role: Role, text: string): string | undefined {
+  const sections = extractStructuredSections(role, text);
+  const orderedKeys = role === "implement"
+    ? ["changed files", "summary", "risks"]
+    : ["conclusion", "evidence", "unknowns"];
+  const matches = orderedKeys.map((key) => sections[key]).filter((value): value is string => Boolean(value));
   if (matches.length === 0) return undefined;
   return matches.join("\n\n");
+}
+
+function firstMeaningfulLine(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0) return undefined;
+  if (lines.length === 1) return lines[0];
+  const head = lines[0].replace(/:$/, "");
+  const next = lines[1];
+  return next ? `${head}: ${next}` : lines[0];
+}
+
+function buildCollectSynthesis(items: Array<{ paneId: string; role: Role; task: string; sections: Partial<Record<string, string>>; excerpt: string; status: string }>): string | undefined {
+  if (items.length === 0) return undefined;
+
+  const combinedFindings = items.map((item) => {
+    const key = item.role === "implement" ? "summary" : "conclusion";
+    const primary = firstMeaningfulLine(item.sections[key]) ?? firstMeaningfulLine(item.excerpt) ?? "No summary available.";
+    return `- ${item.paneId} (${item.role}) ${primary}`;
+  });
+
+  const risks = items.flatMap((item) => {
+    const key = item.role === "implement" ? "risks" : "unknowns";
+    const value = firstMeaningfulLine(item.sections[key]);
+    return value ? [`- ${item.paneId}: ${value}`] : [];
+  });
+
+  const nextStep = items.some((item) => item.role === "implement")
+    ? "Review the implementation-oriented pane results first, then decide whether follow-up code changes or verification are needed."
+    : "Review the research conclusions, resolve the main unknowns, then decide whether to spawn implementation work.";
+
+  const parts = [
+    "# Synthesis",
+    "",
+    "Combined findings:",
+    ...combinedFindings,
+  ];
+
+  if (risks.length > 0) {
+    parts.push("", "Open risks / unknowns:", ...risks);
+  }
+
+  parts.push("", `Suggested next step: ${nextStep}`);
+  return parts.join("\n");
 }
 
 function persistState(pi: ExtensionAPI, agents: SubagentPane[]) {
@@ -472,20 +525,26 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       const panes = await listPanes();
       const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
       const summaries = [] as Array<Record<string, unknown>>;
+      const synthesisItems = [] as Array<{ paneId: string; role: Role; task: string; sections: Partial<Record<string, string>>; excerpt: string; status: string }>;
       const textBlocks: string[] = [];
 
       for (const agent of targetAgents) {
         const sessionText = agent.sessionPath ? await extractAssistantTextFromSession(agent.sessionPath) : undefined;
         const output = sessionText ?? await paneRead(agent.paneId, lines).catch(() => "");
+        const sections = extractStructuredSections(agent.role, output);
         const excerpt = extractStructuredSummary(agent.role, output) ?? clip(output || "(no readable recent output)");
         const status = byId.get(agent.paneId)?.agent_status ?? "missing";
-        summaries.push({ ...agent, status, excerpt });
+        summaries.push({ ...agent, status, excerpt, sections });
+        synthesisItems.push({ paneId: agent.paneId, role: agent.role, task: agent.task, sections, excerpt, status });
         textBlocks.push([`## ${agent.paneId} [${status}] (${agent.role})`, `Task: ${agent.task}`, excerpt].join("\n"));
       }
 
+      const synthesis = buildCollectSynthesis(synthesisItems);
+      const finalText = synthesis ? `${synthesis}\n\n${textBlocks.join("\n\n")}` : textBlocks.join("\n\n");
+
       return {
-        content: [{ type: "text", text: textBlocks.join("\n\n") }],
-        details: { agents: summaries },
+        content: [{ type: "text", text: finalText }],
+        details: { agents: summaries, synthesis },
       };
     },
   });

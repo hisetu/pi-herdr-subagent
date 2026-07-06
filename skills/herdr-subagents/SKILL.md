@@ -65,8 +65,9 @@ expected result shape:
 2. spawn panes with `herdr_subagents_spawn`
 3. inspect progress with `herdr_subagents_status`
 4. collect outputs with `herdr_subagents_collect`
-5. clear finished tracked panes with `herdr_subagents_clear` when you no longer need them
-6. synthesize the final answer in the supervisor pane
+5. use the built-in lightweight synthesis to quickly scan combined findings and unknowns
+6. clear finished tracked panes with `herdr_subagents_clear` when you no longer need them
+7. synthesize the final answer in the supervisor pane when more refinement is needed
 
 ## examples
 

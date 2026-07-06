@@ -31,6 +31,7 @@ This is especially useful when the user wants to **see what each subagent is doi
 - Spawn 2-4 visible subagents in sibling herdr panes
 - Track subagent status by pane
 - Collect structured results from subagent sessions
+- Add a lightweight supervisor synthesis on top of per-pane results
 - Keep the first version simple with only two roles:
   - `research`
   - `implement`
@@ -116,6 +117,11 @@ Example:
 
 Collect results from tracked subagent panes.
 
+The output includes:
+
+- a lightweight synthesized summary across the selected panes
+- the original per-pane structured results
+
 Parameters:
 
 - `wait?: boolean` — wait until panes settle to `idle` / `done`
@@ -188,8 +194,9 @@ Expected output shape:
 2. Call `herdr_subagents_spawn`
 3. Check progress with `herdr_subagents_status`
 4. Collect results with `herdr_subagents_collect`
-5. Clear finished tracked panes with `herdr_subagents_clear` when appropriate
-6. Synthesize the final answer in the supervisor pane
+5. Use the built-in lightweight synthesis as a quick supervisor summary
+6. Clear finished tracked panes with `herdr_subagents_clear` when appropriate
+7. Synthesize the final answer in the supervisor pane if more refinement is needed
 
 ## Example workflow
 
