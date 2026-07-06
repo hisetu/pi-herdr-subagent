@@ -213,6 +213,71 @@ Look for which panes are `working`, `idle`, or `done`.
 
 Use `wait: true` if you want to gather results only after all workers settle.
 
+## Smoke test
+
+Use this quick checklist after install and `/reload`:
+
+1. Spawn a small batch
+
+```json
+{
+  "tasks": [
+    { "task": "Inspect auth flow", "role": "research" },
+    { "task": "Do not edit files; verify implement contract only", "role": "implement" }
+  ],
+  "thinking": "minimal",
+  "cwd": "/Users/lucas"
+}
+```
+
+2. Check the latest batch
+
+```json
+{
+  "includeDone": true,
+  "latestOnly": true
+}
+```
+
+3. Collect the latest batch
+
+```json
+{
+  "wait": true,
+  "latestOnly": true,
+  "timeoutMs": 120000
+}
+```
+
+Expected result:
+
+- a `# Synthesis` block
+- per-pane structured output
+- research panes using `Conclusion / Evidence / Unknowns`
+- implement panes using `Changed files / Summary / Risks`
+
+4. Clear the latest batch and close panes
+
+```json
+{
+  "latestOnly": true,
+  "closePanes": true
+}
+```
+
+5. Verify cleanup
+
+```json
+{
+  "includeDone": true,
+  "latestOnly": true
+}
+```
+
+Expected result:
+
+- `No tracked herdr subagents in this session.`
+
 ## Notes
 
 - This package only works inside herdr-managed panes
