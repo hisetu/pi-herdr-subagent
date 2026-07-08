@@ -264,7 +264,8 @@ function buildPiCommand(role: Role, task: string, sessionPath: string, model?: s
 
 function formatStatusLine(agent: SubagentPane, live?: PaneInfo): string {
   const status = live?.agent_status ?? "missing";
-  return `- ${agent.paneId} [${status}] (${agent.role}) ${agent.task}`;
+  const modelText = agent.model ? ` {model=${agent.model}}` : "";
+  return `- ${agent.paneId} [${status}] (${agent.role})${modelText} ${agent.task}`;
 }
 
 function clip(text: string, max = 500): string {
@@ -714,12 +715,15 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
         const task = extractTaskLine(output);
         const looksLikeSubagent = looksLikeSubagentOutput(output) || Boolean(role) || Boolean(task);
         if (!looksLikeSubagent && !params.includeAllPiPanes) continue;
+        const modelMatch = output.match(/\(([^)]+)\)\s+([a-zA-Z0-9._-]+(?:\/[a-zA-Z0-9._-]+)?)\s+•\s+(off|minimal|low|medium|high|xhigh)/);
+        const model = modelMatch ? `${modelMatch[1]}/${modelMatch[2]}` : undefined;
         rows.push({
           paneId: pane.pane_id,
           status: pane.agent_status ?? "unknown",
           cwd: pane.foreground_cwd ?? pane.cwd ?? "",
           role,
           task,
+          model,
           looksLikeSubagent,
         });
       }
@@ -733,8 +737,9 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
 
       const text = rows.map((row) => {
         const roleText = row.role ? ` (${row.role})` : "";
+        const modelText = row.model ? ` {model=${row.model}}` : "";
         const taskText = row.task ? ` ${row.task}` : "";
-        return `- ${row.paneId} [${row.status}]${roleText}${taskText}`;
+        return `- ${row.paneId} [${row.status}]${roleText}${modelText}${taskText}`;
       }).join("\n");
 
       return {
@@ -825,7 +830,9 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
         const task = extractTaskLine(output);
         const looksLikeSubagent = looksLikeSubagentOutput(output) || Boolean(role) || Boolean(task);
         if (!looksLikeSubagent) continue;
-        lines.push(`- ${pane.pane_id} [${pane.agent_status ?? "unknown"}]${role ? ` (${role})` : ""}${task ? ` ${task}` : ""}`);
+        const modelMatch = output.match(/\(([^)]+)\)\s+([a-zA-Z0-9._-]+(?:\/[a-zA-Z0-9._-]+)?)\s+•\s+(off|minimal|low|medium|high|xhigh)/);
+        const model = modelMatch ? `${modelMatch[1]}/${modelMatch[2]}` : undefined;
+        lines.push(`- ${pane.pane_id} [${pane.agent_status ?? "unknown"}]${role ? ` (${role})` : ""}${model ? ` {model=${model}}` : ""}${task ? ` ${task}` : ""}`);
       }
       ctx.ui.notify(lines.join("\n") || "No likely herdr subagent panes found in the current workspace.", "info");
     },
