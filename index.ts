@@ -32,6 +32,7 @@ type SubagentPane = {
   sessionPath?: string;
   model?: string;
   thinking?: Thinking;
+  command?: string;
 };
 
 type NormalizedSpawnTask = {
@@ -598,6 +599,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           sessionPath,
           model: item.model,
           thinking: params.thinking,
+          command,
         });
       }
 
@@ -606,7 +608,10 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
 
       const text = [
         `Spawned ${created.length} herdr subagent pane(s).`,
-        ...created.map((agent) => formatStatusLine(agent)),
+        ...created.flatMap((agent) => [
+          formatStatusLine(agent),
+          agent.command ? `  command: ${agent.command}` : undefined,
+        ].filter((line): line is string => Boolean(line))),
       ].join("\n");
 
       return {
