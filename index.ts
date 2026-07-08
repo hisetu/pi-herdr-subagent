@@ -311,12 +311,42 @@ function extractStructuredSections(role: Role, text: string): Partial<Record<str
       }
       block.push(current);
     }
-    if (block.length > 0) {
+
+    const body = block.slice(1).filter(Boolean);
+    if (block.length > 0 && body.length > 0) {
       result[header] = block.join("\n");
     }
   }
 
   return result;
+}
+
+function extractErrorSummary(text: string): string | undefined {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const match = lines.find((line) => /^(error:|api_error\b|authenticationerror\b|incorrect api key provided\b)/i.test(line));
+  if (!match) return undefined;
+  const normalized = match.replace(/^error:\s*/i, "");
+  return `Error: ${normalized}`;
+}
+
+function looksLikePaneUiNoise(text: string): boolean {
+  return text.includes("Pi can explain its own features and look up its docs.")
+    || text.includes("Press ctrl+o to show full startup help and loaded resources.")
+    || text.includes("[Prompts]")
+    || text.includes("[Extensions]")
+    || text.includes("[Themes]")
+    || text.includes("Reloaded keybindings, extensions, skills, prompts, themes");
+}
+
+function extractPaneFallbackSummary(role: Role, text: string): string | undefined {
+  const structured = extractStructuredSummary(role, text);
+  if (structured) return structured;
+
+  const error = extractErrorSummary(text);
+  if (error) return error;
+
+  if (looksLikePaneUiNoise(text)) return undefined;
+  return undefined;
 }
 
 function extractStructuredSummary(role: Role, text: string): string | undefined {
@@ -447,7 +477,15 @@ async function extractAssistantTextFromSession(sessionPath: string): Promise<str
     const raw = await fs.readFile(sessionPath, "utf8");
     const lines = raw.split(/\r?\n/).filter(Boolean);
     for (let i = lines.length - 1; i >= 0; i -= 1) {
-      const entry = JSON.parse(lines[i]) as { type?: string; message?: { role?: string; content?: Array<{ type?: string; text?: string }> } };
+      const entry = JSON.parse(lines[i]) as {
+        type?: string;
+        message?: {
+          role?: string;
+          content?: Array<{ type?: string; text?: string }>;
+          stopReason?: string;
+          errorMessage?: string;
+        };
+      };
       if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
       const text = (entry.message.content ?? [])
         .filter((part) => part?.type === "text" && typeof part.text === "string")
@@ -455,6 +493,10 @@ async function extractAssistantTextFromSession(sessionPath: string): Promise<str
         .join("\n")
         .trim();
       if (text) return text;
+
+      const errorMessage = entry.message.errorMessage?.trim();
+      if (errorMessage) return `Error: ${errorMessage}`;
+      if (entry.message.stopReason === "error") return "Error: assistant response failed without text.";
     }
   } catch {
     return undefined;
@@ -476,6 +518,34 @@ async function waitForAgents(targetPaneIds: string[], timeoutMs: number): Promis
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
   throw new Error(`Timed out waiting for panes to settle after ${timeoutMs}ms.`);
+}
+
+async function readCollectedOutput(
+  agent: SubagentPane,
+  lines: number,
+  graceMs = 0,
+): Promise<{ output: string; source: "session" | "pane-fallback" | "missing" }> {
+  const tryRead = async (): Promise<{ output: string; source: "session" | "pane-fallback" | "missing" }> => {
+    const sessionText = agent.sessionPath ? await extractAssistantTextFromSession(agent.sessionPath) : undefined;
+    if (sessionText) return { output: sessionText, source: "session" };
+
+    const paneOutput = await paneRead(agent.paneId, lines).catch(() => "");
+    const fallback = extractPaneFallbackSummary(agent.role, paneOutput);
+    if (fallback) return { output: fallback, source: "pane-fallback" };
+    return { output: "", source: "missing" };
+  };
+
+  let result = await tryRead();
+  if (result.output) return result;
+
+  const deadline = Date.now() + graceMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    result = await tryRead();
+    if (result.output) return result;
+  }
+
+  return result;
 }
 
 export default function herdrSubagentsExtension(pi: ExtensionAPI) {
@@ -665,12 +735,13 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       if (targetAgents.length === 0) {
         return {
           content: [{ type: "text", text: "No tracked herdr subagents to collect from." }],
-          details: { agents: [] },
+          details: { agents: [], synthesis: undefined },
         };
       }
 
       const timeoutMs = params.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
       const lines = params.lines ?? DEFAULT_LINES;
+      const collectGraceMs = params.wait ? Math.min(30000, timeoutMs) : 0;
       if (params.wait) {
         await waitForAgents(targetAgents.map((agent) => agent.paneId), timeoutMs);
       }
@@ -682,12 +753,13 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       const textBlocks: string[] = [];
 
       for (const agent of targetAgents) {
-        const sessionText = agent.sessionPath ? await extractAssistantTextFromSession(agent.sessionPath) : undefined;
-        const output = sessionText ?? await paneRead(agent.paneId, lines).catch(() => "");
+        const { output, source } = await readCollectedOutput(agent, lines, collectGraceMs);
         const sections = extractStructuredSections(agent.role, output);
-        const excerpt = extractStructuredSummary(agent.role, output) ?? clip(output || "(no readable recent output)");
+        const excerpt = extractStructuredSummary(agent.role, output)
+          ?? extractErrorSummary(output)
+          ?? (output ? clip(output) : "(no final assistant text recorded)");
         const status = byId.get(agent.paneId)?.agent_status ?? "missing";
-        summaries.push({ ...agent, status, excerpt, sections });
+        summaries.push({ ...agent, status, excerpt, sections, source });
         synthesisItems.push({ paneId: agent.paneId, role: agent.role, task: agent.task, sections, excerpt, status });
         textBlocks.push([`## ${agent.paneId} [${status}] (${agent.role})`, `Task: ${agent.task}`, excerpt].join("\n"));
       }
@@ -711,7 +783,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       requireHerdr();
       const lines = params.lines ?? 40;
       const panes = await listPanes();
-      const rows: Array<{ paneId: string; status: string; cwd: string; role?: Role; task?: string; looksLikeSubagent: boolean }> = [];
+      const rows: Array<{ paneId: string; status: string; cwd: string; role?: Role; task?: string; model?: string; looksLikeSubagent: boolean }> = [];
 
       for (const pane of panes) {
         if (pane.agent !== "pi") continue;
@@ -881,6 +953,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       }
       await pruneMissingAgents();
       const wait = args.trim() === "wait";
+      const collectGraceMs = wait ? 30000 : 0;
       if (wait) {
         await waitForAgents(agents.map((agent) => agent.paneId), DEFAULT_WAIT_TIMEOUT_MS).catch((error) => {
           ctx.ui.notify(String(error), "warning");
@@ -888,9 +961,10 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       }
       const blocks: string[] = [];
       for (const agent of agents) {
-        const sessionText = agent.sessionPath ? await extractAssistantTextFromSession(agent.sessionPath) : undefined;
-        const output = sessionText ?? await paneRead(agent.paneId, DEFAULT_LINES).catch(() => "");
-        const excerpt = extractStructuredSummary(agent.role, output) ?? clip(output || "(no readable recent output)");
+        const { output } = await readCollectedOutput(agent, DEFAULT_LINES, collectGraceMs);
+        const excerpt = extractStructuredSummary(agent.role, output)
+          ?? extractErrorSummary(output)
+          ?? (output ? clip(output) : "(no final assistant text recorded)");
         blocks.push(`${agent.paneId} (${agent.role}) ${agent.task}\n${excerpt}`);
       }
       ctx.ui.notify(blocks.join("\n\n") || "No tracked herdr subagents.", "info");
