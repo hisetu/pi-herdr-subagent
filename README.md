@@ -35,9 +35,10 @@ This is especially useful when the user wants to **see what each subagent is doi
 - Collect structured results from subagent sessions
 - Add a lightweight supervisor synthesis on top of per-pane results
 - Support lightweight completion notifications routed back to the supervisor pane when tracked panes finish
-- Keep the first version simple with only two roles:
+- Keep the first version simple with three roles:
   - `research`
   - `implement`
+  - `review`
 - Support either one shared default role or per-task role overrides
 
 ## Requirements
@@ -66,9 +67,9 @@ Spawn a few visible subagents in sibling panes.
 
 Parameters:
 
-- `tasks: Array<string | { task: string; role?: "research" | "implement" }>` — 1 to 4 task prompts
-- `role?: "research" | "implement"` — default role fallback when a task does not specify its own role
-- `model?: string` — optional pi model override
+- `tasks: Array<string | { task: string; role?: "research" | "implement" | "review"; model?: string }>` — 1 to 4 task prompts
+- `role?: "research" | "implement" | "review"` — default role fallback when a task does not specify its own role
+- `model?: string` — optional default pi model override
 - `thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh"`
 - `cwd?: string` — working directory for spawned panes
 
@@ -91,7 +92,8 @@ Mixed-role example:
 ```json
 {
   "tasks": [
-    { "task": "Inspect auth token flow in the Postman collection.", "role": "research" },
+    { "task": "Inspect auth token flow in the Postman collection.", "role": "research", "model": "github-copilot/gpt-5.4" },
+    { "task": "Review auth/session refactor for API design and migration risk.", "role": "review", "model": "anthropic/claude-opus-4.7" },
     { "task": "Fix one focused Compose state bug in the Android app.", "role": "implement" }
   ],
   "thinking": "minimal",
@@ -232,6 +234,21 @@ Expected output shape:
 - `Changed files:`
 - `Summary:`
 - `Risks:`
+
+### `review`
+
+Best for:
+
+- correctness review
+- API design review
+- migration risk review
+- maintainability review
+
+Expected output shape:
+
+- `Findings:`
+- `Severity:`
+- `Recommended changes:`
 
 ## Recommended workflow
 
