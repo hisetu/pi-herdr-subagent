@@ -24,6 +24,7 @@ use this when:
 - prefer 2 to 4 panes max
 - prefer `research` unless code changes are clearly required
 - use a shared default role or set role per task when tasks differ
+- available roles are `research`, `implement`, and `review`
 
 ## available tools
 
@@ -61,6 +62,19 @@ expected result shape:
 2. summary
 3. risks
 
+### review
+
+use for:
+- correctness review
+- API design review
+- migration risk review
+- maintainability review
+
+expected result shape:
+1. findings
+2. severity
+3. recommended changes
+
 ## suggested flow
 
 1. split the work into a few narrow tasks
@@ -81,6 +95,7 @@ spawn 2 research panes:
 
 spawn mixed-role panes:
 - `research`: inspect auth token flow in the postman collection
+- `review`: review auth/session refactor for API design and migration risk
 - `implement`: fix one compose state bug
 
 ## when not to use
