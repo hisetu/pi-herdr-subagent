@@ -12,12 +12,13 @@ const DEFAULT_WAIT_TIMEOUT_MS = 300000;
 const DEFAULT_LINES = 30;
 const SESSION_DIR = "/Users/lucas/.pi/agent/extensions/herdr-subagents/sessions";
 
-type Role = "research" | "implement";
+type Role = "research" | "implement" | "review";
 type Thinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 type SpawnTask = {
   task: string;
   role?: Role;
+  model?: string;
 };
 
 type SubagentPane = {
@@ -31,6 +32,12 @@ type SubagentPane = {
   sessionPath?: string;
   model?: string;
   thinking?: Thinking;
+};
+
+type NormalizedSpawnTask = {
+  task: string;
+  role: Role;
+  model?: string;
 };
 
 type PersistedState = {
@@ -54,18 +61,25 @@ type HerdrPaneListResult = {
   };
 };
 
+const roleSchema = Type.Union([
+  Type.Literal("research"),
+  Type.Literal("implement"),
+  Type.Literal("review"),
+], { description: "Subagent role" });
+
 const taskItemSchema = Type.Union([
   Type.String({ minLength: 1 }),
   Type.Object({
     task: Type.String({ minLength: 1, description: "Task prompt" }),
-    role: Type.Optional(Type.Union([Type.Literal("research"), Type.Literal("implement")], { description: "Optional per-task role override" })),
+    role: Type.Optional(roleSchema),
+    model: Type.Optional(Type.String({ description: "Optional per-task model override" })),
   }),
 ]);
 
 const spawnParams = Type.Object({
   tasks: Type.Array(taskItemSchema, { minItems: 1, maxItems: MAX_TASKS, description: `Tasks to run in parallel (max ${MAX_TASKS})` }),
-  role: Type.Optional(Type.Union([Type.Literal("research"), Type.Literal("implement")], { description: "Default subagent role" })),
-  model: Type.Optional(Type.String({ description: "Optional pi model override" })),
+  role: Type.Optional(roleSchema),
+  model: Type.Optional(Type.String({ description: "Optional default pi model override" })),
   thinking: Type.Optional(Type.Union([
     Type.Literal("off"),
     Type.Literal("minimal"),
@@ -114,12 +128,12 @@ function requireHerdr() {
   }
 }
 
-function normalizeSpawnTasks(tasks: Array<string | SpawnTask>, defaultRole: Role): Array<{ task: string; role: Role }> {
+function normalizeSpawnTasks(tasks: Array<string | SpawnTask>, defaultRole: Role, defaultModel?: string): NormalizedSpawnTask[] {
   return tasks.map((item) => {
     if (typeof item === "string") {
-      return { task: item, role: defaultRole };
+      return { task: item, role: defaultRole, model: defaultModel };
     }
-    return { task: item.task, role: item.role ?? defaultRole };
+    return { task: item.task, role: item.role ?? defaultRole, model: item.model ?? defaultModel };
   });
 }
 
@@ -139,6 +153,22 @@ function buildPrompt(role: Role, task: string): string {
       "Changed files:",
       "Summary:",
       "Risks:",
+      "",
+      `Task: ${task}`,
+    ].join("\n");
+  }
+
+  if (role === "review") {
+    return [
+      ...shared,
+      "Your role is review.",
+      "Focus on concrete issues, risk level, and actionable changes.",
+      "Do not broaden scope beyond the assigned review angle.",
+      "Stop as soon as you have enough evidence for a concise review.",
+      "When finished, output exactly these headings:",
+      "Findings:",
+      "Severity:",
+      "Recommended changes:",
       "",
       `Task: ${task}`,
     ].join("\n");
@@ -258,7 +288,9 @@ function extractStructuredSections(role: Role, text: string): Partial<Record<str
   const lines = text.split(/\r?\n/).map((line) => line.trim());
   const headers = role === "implement"
     ? ["changed files", "summary", "risks"]
-    : ["conclusion", "evidence", "unknowns"];
+    : role === "review"
+      ? ["findings", "severity", "recommended changes"]
+      : ["conclusion", "evidence", "unknowns"];
 
   const result: Partial<Record<string, string>> = {};
   for (const header of headers) {
@@ -289,7 +321,9 @@ function extractStructuredSummary(role: Role, text: string): string | undefined 
   const sections = extractStructuredSections(role, text);
   const orderedKeys = role === "implement"
     ? ["changed files", "summary", "risks"]
-    : ["conclusion", "evidence", "unknowns"];
+    : role === "review"
+      ? ["findings", "severity", "recommended changes"]
+      : ["conclusion", "evidence", "unknowns"];
   const matches = orderedKeys.map((key) => sections[key]).filter((value): value is string => Boolean(value));
   if (matches.length === 0) return undefined;
   return matches.join("\n\n");
@@ -318,33 +352,37 @@ function detectRoleFromOutput(text: string): Role | undefined {
   const normalized = text.toLowerCase();
   if (normalized.includes("your role is research.")) return "research";
   if (normalized.includes("your role is implementation.")) return "implement";
+  if (normalized.includes("your role is review.")) return "review";
   return undefined;
 }
 
 function looksLikeSubagentOutput(text: string): boolean {
   return text.includes("You are a subagent working under a supervisor in herdr.")
     || text.includes("Conclusion:")
-    || text.includes("Changed files:");
+    || text.includes("Changed files:")
+    || text.includes("Findings:");
 }
 
 function buildCollectSynthesis(items: Array<{ paneId: string; role: Role; task: string; sections: Partial<Record<string, string>>; excerpt: string; status: string }>): string | undefined {
   if (items.length === 0) return undefined;
 
   const combinedFindings = items.map((item) => {
-    const key = item.role === "implement" ? "summary" : "conclusion";
+    const key = item.role === "implement" ? "summary" : item.role === "review" ? "findings" : "conclusion";
     const primary = firstMeaningfulLine(item.sections[key]) ?? firstMeaningfulLine(item.excerpt) ?? "No summary available.";
     return `- ${item.paneId} (${item.role}) ${primary}`;
   });
 
   const risks = items.flatMap((item) => {
-    const key = item.role === "implement" ? "risks" : "unknowns";
+    const key = item.role === "implement" ? "risks" : item.role === "review" ? "severity" : "unknowns";
     const value = firstMeaningfulLine(item.sections[key]);
     return value ? [`- ${item.paneId}: ${value}`] : [];
   });
 
   const nextStep = items.some((item) => item.role === "implement")
     ? "Review the implementation-oriented pane results first, then decide whether follow-up code changes or verification are needed."
-    : "Review the research conclusions, resolve the main unknowns, then decide whether to spawn implementation work.";
+    : items.some((item) => item.role === "review")
+      ? "Review the reviewer findings and severity notes, then decide whether the issues warrant follow-up fixes or can be accepted."
+      : "Review the research conclusions, resolve the main unknowns, then decide whether to spawn implementation work.";
 
   const parts = [
     "# Synthesis",
@@ -538,7 +576,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       const sourcePane = process.env.HERDR_PANE_ID as string;
       const created: SubagentPane[] = [];
       const batchId = makeBatchId();
-      const normalizedTasks = normalizeSpawnTasks(params.tasks as Array<string | SpawnTask>, defaultRole);
+      const normalizedTasks = normalizeSpawnTasks(params.tasks as Array<string | SpawnTask>, defaultRole, params.model);
 
       await fs.mkdir(SESSION_DIR, { recursive: true });
 
@@ -546,7 +584,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
         const paneId = await splitPane(sourcePane, cwd);
         const sessionPath = makeSessionPath();
         await fs.mkdir(dirname(sessionPath), { recursive: true });
-        const command = buildPiCommand(item.role, item.task, sessionPath, params.model, params.thinking);
+        const command = buildPiCommand(item.role, item.task, sessionPath, item.model, params.thinking);
         await paneRun(paneId, command);
         created.push({
           paneId,
@@ -557,7 +595,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           batchId,
           supervisorPaneId: sourcePane,
           sessionPath,
-          model: params.model,
+          model: item.model,
           thinking: params.thinking,
         });
       }
