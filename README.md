@@ -1,12 +1,14 @@
 # pi-herdr-subagent
 
+[繁體中文](./README.zh-TW.md)
+
 Visible herdr-based subagents for pi.
 
 This package lets a supervisor agent spawn a few **real pi subagents in separate herdr panes** so the user can watch progress directly instead of relying on hidden background workers.
 
 ## What it does
 
-It adds three tools:
+It adds these tools:
 
 - `herdr_subagents_spawn`
 - `herdr_subagents_status`
@@ -22,15 +24,15 @@ It also bundles a `herdr-subagents` skill for supervisor-style pane orchestratio
 Use this when you want:
 
 - one main supervisor pane
-- 2-4 visible worker panes
-- transparent parallel research or implementation work
+- 1-4 visible worker panes
+- transparent parallel research, review, or implementation work
 - a simple fan-out / fan-in workflow inside herdr
 
 This is especially useful when the user wants to **see what each subagent is doing**.
 
 ## Features
 
-- Spawn 2-4 visible subagents in sibling herdr panes
+- Spawn 1-4 visible subagents in sibling herdr panes
 - Track subagent status by pane
 - Collect structured results from subagent sessions
 - Add a lightweight supervisor synthesis on top of per-pane results
@@ -353,7 +355,4 @@ Expected result:
 
 ## Future ideas
 
-- collect only the latest batch
-- close/clear tracked panes
-- support per-task role selection
 - richer supervisor summaries
