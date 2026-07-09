@@ -254,13 +254,32 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
+function sanitizePaneTitle(value: string): string {
+  return value
+    .replace(/[\u0007\u001b]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function makePaneTitle(role: Role, task: string): string {
+  const simplifiedTask = task
+    .replace(/^Review jj diff\s+\S+\s+/i, "")
+    .replace(/^for\s+/i, "")
+    .replace(/^Reply with exactly one word:\s*/i, "")
+    .trim();
+  const shortenedTask = simplifiedTask.length > 42 ? `${simplifiedTask.slice(0, 41)}…` : simplifiedTask;
+  return sanitizePaneTitle(`${role}: ${shortenedTask || "subagent"}`);
+}
+
 function buildPiCommand(role: Role, task: string, sessionPath: string, model?: string, thinking?: Thinking): string {
   const prompt = buildPrompt(role, task);
   const parts = ["pi", "--session", shellQuote(sessionPath)];
   if (model) parts.push("--model", shellQuote(model));
   if (thinking) parts.push("--thinking", shellQuote(thinking));
   parts.push(shellQuote(prompt));
-  return parts.join(" ");
+  const piCommand = parts.join(" ");
+  const title = makePaneTitle(role, task);
+  return `printf '\\033]0;%s\\007' ${shellQuote(title)}; ${piCommand}`;
 }
 
 function formatStatusLine(agent: SubagentPane, live?: PaneInfo): string {
