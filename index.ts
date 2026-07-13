@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
+import { createConnection } from "node:net";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -10,10 +11,14 @@ const STATE_TYPE = "herdr-subagents-state";
 const MAX_TASKS = 4;
 const DEFAULT_WAIT_TIMEOUT_MS = 300000;
 const DEFAULT_LINES = 30;
+const MAX_MESSAGES = 200;
+const MESSAGE_SOURCE = "pi-herdr-subagents";
 const SESSION_DIR = "/Users/lucas/.pi/agent/extensions/herdr-subagents/sessions";
 
 type Role = "research" | "implement" | "review";
 type Thinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+type MessageKind = "finding" | "question" | "status" | "ack";
+type MessageDelivery = "reported" | "target_missing" | "report_failed";
 
 type SpawnTask = {
   task: string;
@@ -41,8 +46,21 @@ type NormalizedSpawnTask = {
   model?: string;
 };
 
+type SubagentMessage = {
+  messageId: string;
+  fromPaneId: string;
+  toPaneId: string;
+  kind: MessageKind;
+  body: string;
+  createdAt: number;
+  delivery: MessageDelivery;
+  ttlMs?: number;
+  error?: string;
+};
+
 type PersistedState = {
   agents: SubagentPane[];
+  messages?: SubagentMessage[];
 };
 
 type PaneInfo = {
@@ -117,6 +135,26 @@ const interruptParams = Type.Object({
 const globalStatusParams = Type.Object({
   lines: Type.Optional(Type.Number({ minimum: 10, maximum: 200, description: "How many recent lines to inspect per pane" })),
   includeAllPiPanes: Type.Optional(Type.Boolean({ description: "Include all pi panes even if they do not look like subagents" })),
+});
+const messageKindSchema = Type.Union([
+  Type.Literal("finding"),
+  Type.Literal("question"),
+  Type.Literal("status"),
+  Type.Literal("ack"),
+], { description: "Structured subagent message kind" });
+
+const messageParams = Type.Object({
+  toPaneId: Type.String({ minLength: 1, description: "Target pane id" }),
+  body: Type.String({ minLength: 1, description: "Message body" }),
+  kind: Type.Optional(messageKindSchema),
+  fromPaneId: Type.Optional(Type.String({ minLength: 1, description: "Logical sender pane id for relayed messages" })),
+  messageId: Type.Optional(Type.String({ minLength: 1, description: "Optional caller-supplied message id" })),
+  ttlMs: Type.Optional(Type.Number({ minimum: 1, maximum: 86400000, description: "Optional metadata TTL in milliseconds" })),
+});
+
+const messageLogParams = Type.Object({
+  paneId: Type.Optional(Type.String({ minLength: 1, description: "Filter messages involving one pane id" })),
+  limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: "Maximum messages to return" })),
 });
 
 function insideHerdr(): boolean {
@@ -450,18 +488,21 @@ function buildCollectSynthesis(items: Array<{ paneId: string; role: Role; task: 
   return parts.join("\n");
 }
 
-function persistState(pi: ExtensionAPI, agents: SubagentPane[]) {
-  pi.appendEntry<PersistedState>(STATE_TYPE, { agents });
+function persistState(pi: ExtensionAPI, agents: SubagentPane[], messages: SubagentMessage[]) {
+  pi.appendEntry<PersistedState>(STATE_TYPE, { agents, messages });
 }
 
-function restoreState(ctx: ExtensionContext): SubagentPane[] {
+function restoreState(ctx: ExtensionContext): PersistedState {
   const branch = ctx.sessionManager.getBranch();
-  let last: SubagentPane[] = [];
+  let last: PersistedState = { agents: [], messages: [] };
   for (const entry of branch) {
     if (entry.type === "custom" && entry.customType === STATE_TYPE) {
       const data = entry.data as PersistedState | undefined;
       if (Array.isArray(data?.agents)) {
-        last = data.agents;
+        last = {
+          agents: data.agents,
+          messages: Array.isArray(data.messages) ? data.messages : [],
+        };
       }
     }
   }
@@ -484,6 +525,102 @@ function getLatestBatchId(list: SubagentPane[]): string | undefined {
   }
   return latest?.batchId;
 }
+function makeMessageId(): string {
+  return `msg-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function compactMessageBody(body: string, max = 60): string {
+  const normalized = body.replace(/\s+/g, " ").trim();
+  return normalized.length > max ? `${normalized.slice(0, max - 1)}…` : normalized;
+}
+
+function formatMessageTitle(kind: MessageKind, fromPaneId: string): string {
+  return compactMessageBody(`${kind} from ${fromPaneId}`, 80);
+}
+
+function formatMessageStatus(kind: MessageKind): string {
+  return compactMessageBody(`message: ${kind}`, 32);
+}
+
+async function herdrSocketCall<T>(method: string, params: Record<string, unknown>): Promise<T> {
+  const socketPath = process.env.HERDR_SOCKET_PATH;
+  if (!socketPath) throw new Error("HERDR_SOCKET_PATH is not available in this pane.");
+
+  const id = `req-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
+  return await new Promise<T>((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    let buffer = "";
+    let settled = false;
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      socket.end();
+      fn();
+    };
+
+    socket.setEncoding("utf8");
+    socket.on("connect", () => {
+      socket.write(`${JSON.stringify({ id, method, params })}
+`);
+    });
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      while (true) {
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) break;
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+        try {
+          const message = JSON.parse(line) as { id?: string; result?: T; error?: { message?: string } };
+          if (message.id !== id) continue;
+          if (message.error) {
+            finish(() => reject(new Error(message.error?.message ?? `Herdr socket call failed: ${method}`)));
+            return;
+          }
+          finish(() => resolve(message.result as T));
+          return;
+        } catch (error) {
+          finish(() => reject(error));
+          return;
+        }
+      }
+    });
+    socket.on("error", (error) => finish(() => reject(error)));
+    socket.on("end", () => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(`Herdr socket closed before responding to ${method}.`));
+      }
+    });
+  });
+}
+
+async function reportMessageMetadata(message: SubagentMessage): Promise<void> {
+  await herdrSocketCall("pane.report_metadata", {
+    pane_id: message.toPaneId,
+    source: MESSAGE_SOURCE,
+    title: formatMessageTitle(message.kind, message.fromPaneId),
+    custom_status: formatMessageStatus(message.kind),
+    ttl_ms: message.ttlMs,
+    seq: message.createdAt,
+  });
+}
+
+function renderMessageLine(message: SubagentMessage): string {
+  const statusText = message.delivery === "reported"
+    ? "reported"
+    : message.delivery === "target_missing"
+      ? "target missing"
+      : `report failed${message.error ? `: ${message.error}` : ""}`;
+  return `- ${message.messageId} [${message.kind}] ${message.fromPaneId} -> ${message.toPaneId} (${statusText}) ${compactMessageBody(message.body, 120)}`;
+}
+
+function keepRecentMessages(messages: SubagentMessage[]): SubagentMessage[] {
+  return messages.slice(-MAX_MESSAGES);
+}
+
 
 function filterAgentsByBatch(list: SubagentPane[], latestOnly?: boolean): SubagentPane[] {
   if (!latestOnly) return list;
@@ -569,11 +706,14 @@ async function readCollectedOutput(
 
 export default function herdrSubagentsExtension(pi: ExtensionAPI) {
   let agents: SubagentPane[] = [];
+  let messages: SubagentMessage[] = [];
   let statusPollTimer: NodeJS.Timeout | undefined;
   const lastKnownStatuses = new Map<string, string>();
 
   const refreshFromSession = (ctx: ExtensionContext) => {
-    agents = restoreState(ctx);
+    const restored = restoreState(ctx);
+    agents = restored.agents;
+    messages = Array.isArray(restored.messages) ? restored.messages : [];
   };
 
   const pruneMissingAgents = async (): Promise<void> => {
@@ -583,7 +723,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
     const nextAgents = agents.filter((agent) => livePaneIds.has(agent.paneId));
     if (nextAgents.length !== agents.length) {
       agents = nextAgents;
-      persistState(pi, agents);
+      persistState(pi, agents, messages);
     }
   };
 
@@ -693,7 +833,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       }
 
       agents = [...agents, ...created];
-      persistState(pi, agents);
+      persistState(pi, agents, messages);
 
       const text = [
         `Spawned ${created.length} herdr subagent pane(s).`,
@@ -738,6 +878,76 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
         details: {
           agents: rows.map(({ agent, live }) => ({ ...agent, status: live?.agent_status ?? "missing" })),
         },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "herdr_subagents_message",
+    label: "Herdr Message",
+    description: "Record and route a structured metadata message to a target pane.",
+    parameters: messageParams,
+    async execute(_toolCallId, params) {
+      requireHerdr();
+      await pruneMissingAgents();
+      const fromPaneId = params.fromPaneId ?? (process.env.HERDR_PANE_ID as string);
+      const panes = await listPanes();
+      const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
+      const createdAt = Date.now();
+      const message: SubagentMessage = {
+        messageId: params.messageId?.trim() || makeMessageId(),
+        fromPaneId,
+        toPaneId: params.toPaneId,
+        kind: params.kind ?? "status",
+        body: params.body.trim(),
+        createdAt,
+        delivery: "reported",
+        ttlMs: params.ttlMs,
+      };
+
+      if (!byId.has(message.toPaneId)) {
+        message.delivery = "target_missing";
+      } else {
+        try {
+          await reportMessageMetadata(message);
+        } catch (error) {
+          message.delivery = "report_failed";
+          message.error = String(error);
+        }
+      }
+
+      messages = keepRecentMessages([...messages, message]);
+      persistState(pi, agents, messages);
+
+      return {
+        content: [{ type: "text", text: renderMessageLine(message) }],
+        details: { message },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "herdr_subagents_messages",
+    label: "Herdr Messages",
+    description: "Show recent structured subagent message records.",
+    parameters: messageLogParams,
+    async execute(_toolCallId, params) {
+      requireHerdr();
+      const limit = params.limit ?? 20;
+      const rows = messages
+        .filter((message) => !params.paneId || message.fromPaneId === params.paneId || message.toPaneId === params.paneId)
+        .slice(-limit);
+
+      if (rows.length === 0) {
+        return {
+          content: [{ type: "text", text: "No structured subagent messages recorded in this session." }],
+          details: { messages: [] },
+        };
+      }
+
+      return {
+        content: [{ type: "text", text: rows.map(renderMessageLine).join("\n") }],
+        details: { messages: rows },
       };
     },
   });
@@ -901,7 +1111,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
 
       const clearedIds = new Set(targetAgents.map((agent) => agent.paneId));
       agents = agents.filter((agent) => !clearedIds.has(agent.paneId));
-      persistState(pi, agents);
+      persistState(pi, agents, messages);
 
       return {
         content: [{ type: "text", text: `Cleared ${targetAgents.length} tracked herdr subagent(s).` }],
@@ -1033,7 +1243,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
         }
       }
       agents = [];
-      persistState(pi, agents);
+      persistState(pi, agents, messages);
       ctx.ui.notify(`Cleared ${targetAgents.length} tracked herdr subagent(s).`, "info");
     },
   });
