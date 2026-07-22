@@ -105,6 +105,10 @@ do not use this when:
 - the user does not care about visible pane-by-pane progress
 - the work is highly coupled and requires constant shared context
 
+## herdr CLI reference
+
+> For full pane/tab/workspace/agent CLI operations, see the **herdr-ops** skill.
+
 ## practical tips
 
 - use `latestOnly: true` when you only want the newest spawned batch
