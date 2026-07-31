@@ -250,8 +250,14 @@ async function listPanes(): Promise<PaneInfo[]> {
   return parsed.result?.panes ?? [];
 }
 
-async function splitPane(sourcePaneId: string, cwd?: string): Promise<string> {
-  const args = ["pane", "split", sourcePaneId, "--direction", "right", "--no-focus"];
+type SplitDirection = "right" | "down";
+
+async function splitPane(
+  sourcePaneId: string,
+  direction: SplitDirection,
+  cwd?: string,
+): Promise<string> {
+  const args = ["pane", "split", sourcePaneId, "--direction", direction, "--no-focus"];
   if (cwd) args.push("--cwd", cwd);
   const stdout = await runHerdr(args);
   const parsed = JSON.parse(stdout) as { result?: { pane?: { pane_id?: string } } };
@@ -811,8 +817,16 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
 
       await fs.mkdir(SESSION_DIR, { recursive: true });
 
+      const splitTargets = [sourcePane];
+      let direction: SplitDirection = "right";
       for (const item of normalizedTasks) {
-        const paneId = await splitPane(sourcePane, cwd);
+        const targetPaneId = splitTargets.shift();
+        if (!targetPaneId) throw new Error("No pane available for the next subagent.");
+
+        const paneId = await splitPane(targetPaneId, direction, cwd);
+        splitTargets.push(targetPaneId, paneId);
+        direction = direction === "right" ? "down" : "right";
+
         const sessionPath = makeSessionPath();
         await fs.mkdir(dirname(sessionPath), { recursive: true });
         const command = buildPiCommand(item.role, item.task, sessionPath, item.model, params.thinking);

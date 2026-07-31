@@ -346,6 +346,7 @@ Expected result:
 ## Notes
 
 - This package only works inside herdr-managed panes
+- Spawned panes use a balanced breadth-first layout: each split alternates between right and down instead of repeatedly narrowing the supervisor pane
 - Use `herdr_subagents_global_status` when you are in a different supervisor/session and still want a rough workspace-wide subagent overview
 - First version supports either **one shared role per spawn call** or **per-task role overrides**
 - Collection prefers reading the spawned subagent's **session output**, then falls back to pane output if needed

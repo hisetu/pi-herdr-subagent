@@ -215,6 +215,7 @@ pi install https://github.com/hisetu/pi-herdr-subagent
 ## 備註
 
 - 這個套件只能在 herdr 管理的 panes 內使用
+- 新 pane 會使用廣度優先的平衡配置，每次交替向右、向下分割，避免持續壓窄 supervisor pane
 - 若你在不同 supervisor / session 中觀察，可用 `herdr_subagents_global_status` 看 workspace-wide 的粗略狀態
 - 支援整批共用角色，也支援 per-task role overrides
 - collect 會優先讀取 spawned subagent 的 **session output**，不足時才 fallback 到 pane output
