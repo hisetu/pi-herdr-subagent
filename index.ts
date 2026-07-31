@@ -35,6 +35,7 @@ type SubagentPane = {
   batchId: string;
   supervisorPaneId: string;
   sessionPath?: string;
+  agentName?: string;
   model?: string;
   thinking?: Thinking;
   command?: string;
@@ -275,6 +276,30 @@ async function paneRun(paneId: string, command: string): Promise<void> {
   await runHerdr(["pane", "run", paneId, command]);
 }
 
+async function paneRename(paneId: string, title: string): Promise<void> {
+  await runHerdr(["pane", "rename", paneId, title]);
+}
+
+async function startPiAgent(paneId: string, agentName: string, piArgs: string[]): Promise<void> {
+  await runHerdr([
+    "agent",
+    "start",
+    agentName,
+    "--kind",
+    "pi",
+    "--pane",
+    paneId,
+    "--timeout",
+    "60000",
+    "--",
+    ...piArgs,
+  ]);
+}
+
+async function agentPrompt(agentName: string, prompt: string): Promise<void> {
+  await runHerdr(["agent", "prompt", agentName, prompt]);
+}
+
 async function paneRead(paneId: string, lines: number): Promise<string> {
   return runHerdr(["pane", "read", paneId, "--source", "recent-unwrapped", "--lines", String(lines)]);
 }
@@ -320,21 +345,23 @@ function makePaneTitle(role: Role, task: string): string {
   return sanitizePaneTitle(`${role}: ${shortenedTask || "subagent"}`);
 }
 
-function buildPiCommand(role: Role, task: string, sessionPath: string, model?: string, thinking?: Thinking): string {
-  const prompt = buildPrompt(role, task);
-  const parts = ["pi", "--session", shellQuote(sessionPath)];
-  if (model) parts.push("--model", shellQuote(model));
-  if (thinking) parts.push("--thinking", shellQuote(thinking));
-  parts.push(shellQuote(prompt));
-  const piCommand = parts.join(" ");
-  const title = makePaneTitle(role, task);
-  return `printf '\\033]0;%s\\007' ${shellQuote(title)}; ${piCommand}`;
+function buildPiArgs(sessionPath: string, model?: string, thinking?: Thinking): string[] {
+  const args = ["--session", sessionPath];
+  if (model) args.push("--model", model);
+  if (thinking) args.push("--thinking", thinking);
+  return args;
+}
+
+function makeAgentName(role: Role, index: number, batchId: string): string {
+  const batchSuffix = batchId.split("-").at(-1) ?? "batch";
+  return `${role}-${index + 1}-${batchSuffix}`.slice(0, 32);
 }
 
 function formatStatusLine(agent: SubagentPane, live?: PaneInfo): string {
   const status = live?.agent_status ?? "missing";
+  const nameText = agent.agentName ? ` {agent=${agent.agentName}}` : "";
   const modelText = agent.model ? ` {model=${agent.model}}` : "";
-  return `- ${agent.paneId} [${status}] (${agent.role})${modelText} ${agent.task}`;
+  return `- ${agent.paneId} [${status}] (${agent.role})${nameText}${modelText} ${agent.task}`;
 }
 
 function clip(text: string, max = 500): string {
@@ -800,10 +827,12 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "herdr_subagents_spawn",
     label: "Herdr Spawn",
-    description: "Spawn simple herdr-based subagents in sibling panes.",
-    promptSnippet: "Spawn herdr-based subagents in separate panes for parallel research or implementation tasks.",
+    description: "Proactively spawn visible herdr-based subagents for non-trivial work with two or more independent tracks.",
+    promptSnippet: "Proactively parallelize multi-track research, debugging, review, or isolated implementation in visible Herdr panes.",
     promptGuidelines: [
-      "Use herdr_subagents_spawn when the user wants visible pane-based subagents in herdr.",
+      "Proactively use herdr_subagents_spawn without waiting for an explicit request when a non-trivial task has two or more independent workstreams.",
+      "Prefer herdr_subagents_spawn for multi-module investigation, debugging separate hypotheses, comparing alternatives, independent review, and isolated non-overlapping implementation tasks.",
+      "Do not use herdr_subagents_spawn for tiny sequential tasks, tightly coupled work, or workers that would edit the same files.",
       "Use herdr_subagents_status to inspect spawned pane status before reporting progress.",
       "Use herdr_subagents_collect to gather results after spawned panes finish.",
     ],
@@ -849,8 +878,13 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
 
         const sessionPath = makeSessionPath();
         await fs.mkdir(dirname(sessionPath), { recursive: true });
-        const command = buildPiCommand(item.role, item.task, sessionPath, item.model, params.thinking);
-        await paneRun(paneId, command);
+        const agentName = makeAgentName(item.role, index, batchId);
+        const piArgs = buildPiArgs(sessionPath, item.model, params.thinking);
+        const command = ["pi", ...piArgs].map(shellQuote).join(" ");
+
+        await paneRename(paneId, makePaneTitle(item.role, item.task));
+        await startPiAgent(paneId, agentName, piArgs);
+        await agentPrompt(agentName, buildPrompt(item.role, item.task));
         created.push({
           paneId,
           role: item.role,
@@ -860,6 +894,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           batchId,
           supervisorPaneId: sourcePane,
           sessionPath,
+          agentName,
           model: item.model,
           thinking: params.thinking,
           command,
@@ -873,6 +908,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
         `Spawned ${created.length} herdr subagent pane(s).`,
         ...created.flatMap((agent) => [
           formatStatusLine(agent),
+          agent.agentName ? `  agent: ${agent.agentName}` : undefined,
           agent.command ? `  command: ${agent.command}` : undefined,
         ].filter((line): line is string => Boolean(line))),
       ].join("\n");

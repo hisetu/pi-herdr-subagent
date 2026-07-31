@@ -28,12 +28,13 @@ Use this when you want:
 - transparent parallel research, review, or implementation work
 - a simple fan-out / fan-in workflow inside herdr
 
-This is especially useful when the user wants to **see what each subagent is doing**.
+The bundled prompt guidance proactively uses this workflow for non-trivial tasks with two or more independent tracks; the user does not need to explicitly request subagents.
 
 ## Features
 
 - Spawn 1-4 visible subagents in sibling herdr panes
-- Track subagent status by pane
+- Start each worker through `herdr agent start` with a unique name such as `research-1-a1b2c3`
+- Track subagent status by pane and agent name
 - Collect structured results from subagent sessions
 - Add a lightweight supervisor synthesis on top of per-pane results
 - Support lightweight completion notifications routed back to the supervisor pane when tracked panes finish

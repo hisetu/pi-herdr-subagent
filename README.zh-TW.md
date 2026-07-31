@@ -28,12 +28,13 @@
 - 透明化的平行 research / review / implementation 工作流
 - 在 herdr 裡進行簡單的 fan-out / fan-in 流程
 
-當使用者想要 **直接看到每個 subagent 在做什麼** 時，這特別有幫助。
+內建的 prompt guidance 會在非瑣碎且可拆成兩個以上獨立工作流的任務中主動使用 subagents，不需要等使用者明確提出。
 
 ## 特性
 
 - 在相鄰的 herdr panes 中啟動 1-4 個可見 subagents
-- 依 pane 追蹤 subagent 狀態
+- 透過 `herdr agent start` 啟動每個 worker，並設定如 `research-1-a1b2c3` 的唯一名稱
+- 依 pane 與 agent name 追蹤 subagent 狀態
 - 從 subagent session 收集結構化結果
 - 在各 pane 結果之上加上一層輕量 supervisor synthesis
 - 支援在 tracked pane 完成時，將輕量 completion notification 回送到 supervisor pane
