@@ -111,7 +111,7 @@ do not use this when:
 
 ## practical tips
 
-- spawned panes are distributed breadth-first with alternating right/down splits to avoid a row of narrow panes
+- the first worker opens to the supervisor's right; later workers are distributed breadth-first inside that right-side worker area without splitting the supervisor again
 - use `latestOnly: true` when you only want the newest spawned batch
 - use per-task roles when one batch mixes investigation and implementation
 - use `herdr_subagents_interrupt` if one worker looks stuck

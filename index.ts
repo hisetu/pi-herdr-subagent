@@ -252,6 +252,11 @@ async function listPanes(): Promise<PaneInfo[]> {
 
 type SplitDirection = "right" | "down";
 
+type SplitTarget = {
+  paneId: string;
+  depth: number;
+};
+
 async function splitPane(
   sourcePaneId: string,
   direction: SplitDirection,
@@ -817,15 +822,30 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
 
       await fs.mkdir(SESSION_DIR, { recursive: true });
 
-      const splitTargets = [sourcePane];
-      let direction: SplitDirection = "right";
-      for (const item of normalizedTasks) {
-        const targetPaneId = splitTargets.shift();
-        if (!targetPaneId) throw new Error("No pane available for the next subagent.");
+      const workerSplitTargets: SplitTarget[] = [];
+      for (const [index, item] of normalizedTasks.entries()) {
+        const target = index === 0 ? undefined : workerSplitTargets.shift();
+        if (index > 0 && !target) {
+          throw new Error("No worker pane available for the next subagent.");
+        }
 
+        const targetPaneId = target?.paneId ?? sourcePane;
+        const direction: SplitDirection = !target
+          ? "right"
+          : target.depth % 2 === 0
+            ? "down"
+            : "right";
         const paneId = await splitPane(targetPaneId, direction, cwd);
-        splitTargets.push(targetPaneId, paneId);
-        direction = direction === "right" ? "down" : "right";
+
+        if (!target) {
+          workerSplitTargets.push({ paneId, depth: 0 });
+        } else {
+          const childDepth = target.depth + 1;
+          workerSplitTargets.push(
+            { paneId: targetPaneId, depth: childDepth },
+            { paneId, depth: childDepth },
+          );
+        }
 
         const sessionPath = makeSessionPath();
         await fs.mkdir(dirname(sessionPath), { recursive: true });
