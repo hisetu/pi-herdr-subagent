@@ -1,6 +1,6 @@
 ---
 name: herdr-ops
-description: Herdr terminal workspace CLI operations — pane, tab, workspace, agent, and layout management. Use when the user asks to rename panes, split terminals, move panes, manage agents, read output, resize layout, swap panes, zoom, or perform any herdr CLI operation beyond basic subagent spawning. Triggers: herdr pane, herdr tab, herdr workspace, herdr agent, rename pane, split pane, move pane, swap pane, zoom pane, resize pane, herdr CLI, terminal layout, herdr操作, pane管理.
+description: "Herdr terminal workspace CLI operations — pane, tab, workspace, agent, and layout management. Use when the user asks to rename panes, split terminals, move panes, manage agents, read output, resize layout, swap panes, zoom, or perform any herdr CLI operation beyond basic subagent spawning. Triggers: herdr pane, herdr tab, herdr workspace, herdr agent, rename pane, split pane, move pane, swap pane, zoom pane, resize pane, herdr CLI, terminal layout, herdr操作, pane管理."
 ---
 
 # herdr-ops
