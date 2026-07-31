@@ -116,5 +116,5 @@ do not use this when:
 - use per-task roles when one batch mixes investigation and implementation
 - use `herdr_subagents_interrupt` if one worker looks stuck
 - when a worker finishes, expect a lightweight completion notify in the supervisor pane
-- use `herdr_subagents_clear` to avoid stale tracked panes building up over time
-- use `closePanes: true` when you want to close worker panes as part of cleanup
+- use `herdr_subagents_clear` to close worker panes and remove stale tracking; closing is the default
+- use `closePanes: false` only when you want to clear tracking while leaving worker panes open

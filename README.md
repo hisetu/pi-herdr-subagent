@@ -182,18 +182,18 @@ Example:
 
 ### `herdr_subagents_clear`
 
-Clear tracked subagent panes and optionally close them.
+Close tracked subagent panes and clear their tracking records. Closing is the default; set `closePanes` to `false` only when the panes should remain open.
 
 Parameters:
 
-- `closePanes?: boolean`
+- `closePanes?: boolean` — defaults to `true`
 - `latestOnly?: boolean`
 
-Example:
+Example that clears tracking but keeps panes open:
 
 ```json
 {
-  "closePanes": true,
+  "closePanes": false,
   "latestOnly": true
 }
 ```
@@ -325,8 +325,7 @@ Expected result:
 
 ```json
 {
-  "latestOnly": true,
-  "closePanes": true
+  "latestOnly": true
 }
 ```
 

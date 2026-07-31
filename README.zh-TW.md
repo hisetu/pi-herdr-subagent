@@ -148,11 +148,11 @@ pi install https://github.com/hisetu/pi-herdr-subagent
 
 ### `herdr_subagents_clear`
 
-清除 tracked subagent panes，並可選擇關閉它們。
+關閉 tracked subagent panes 並清除追蹤紀錄。預設會關閉 Pane；只有要保留 Pane 時才將 `closePanes` 設為 `false`。
 
 參數：
 
-- `closePanes?: boolean`
+- `closePanes?: boolean` — 預設為 `true`
 - `latestOnly?: boolean`
 
 ## 角色

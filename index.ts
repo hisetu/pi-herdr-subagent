@@ -123,7 +123,7 @@ const collectParams = Type.Object({
 });
 
 const clearParams = Type.Object({
-  closePanes: Type.Optional(Type.Boolean({ description: "Close tracked panes before clearing them" })),
+  closePanes: Type.Optional(Type.Boolean({ description: "Close tracked panes before clearing them; defaults to true" })),
   latestOnly: Type.Optional(Type.Boolean({ description: "Clear only the most recent spawned batch" })),
 });
 
@@ -1104,7 +1104,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "herdr_subagents_clear",
     label: "Herdr Clear",
-    description: "Clear tracked herdr-based subagent panes and optionally close them.",
+    description: "Close and clear tracked herdr-based subagent panes by default; set closePanes to false to leave panes open.",
     parameters: clearParams,
     async execute(_toolCallId, params) {
       requireHerdr();
@@ -1113,23 +1113,39 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       if (targetAgents.length === 0) {
         return {
           content: [{ type: "text", text: "No tracked herdr subagents to clear." }],
-          details: { cleared: [], remaining: agents },
+          details: { closed: [], cleared: [], failedToClose: [], remaining: agents },
         };
       }
 
-      if (params.closePanes) {
+      const closePanes = params.closePanes ?? true;
+      const failedToClose: SubagentPane[] = [];
+      if (closePanes) {
         for (const agent of targetAgents) {
-          await paneClose(agent.paneId).catch(() => undefined);
+          await paneClose(agent.paneId).catch(() => failedToClose.push(agent));
         }
       }
 
-      const clearedIds = new Set(targetAgents.map((agent) => agent.paneId));
+      const failedIds = new Set(failedToClose.map((agent) => agent.paneId));
+      const clearedAgents = closePanes
+        ? targetAgents.filter((agent) => !failedIds.has(agent.paneId))
+        : targetAgents;
+      const clearedIds = new Set(clearedAgents.map((agent) => agent.paneId));
       agents = agents.filter((agent) => !clearedIds.has(agent.paneId));
       persistState(pi, agents, messages);
 
+      const text = !closePanes
+        ? `Cleared tracking for ${clearedAgents.length} herdr subagent(s); panes remain open.`
+        : failedToClose.length === 0
+          ? `Closed and cleared ${clearedAgents.length} herdr subagent pane(s).`
+          : `Closed and cleared ${clearedAgents.length} herdr subagent pane(s); ${failedToClose.length} failed to close and remain tracked.`;
       return {
-        content: [{ type: "text", text: `Cleared ${targetAgents.length} tracked herdr subagent(s).` }],
-        details: { cleared: targetAgents, remaining: agents },
+        content: [{ type: "text", text }],
+        details: {
+          closed: closePanes ? clearedAgents : [],
+          cleared: clearedAgents,
+          failedToClose,
+          remaining: agents,
+        },
       };
     },
   });
@@ -1238,27 +1254,38 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("herdr-subagents-clear", {
-    description: "Clear tracked herdr subagent panes (append 'close' to also close panes)",
+    description: "Close and clear tracked subagent panes (append 'keep' to leave panes open)",
     handler: async (args, ctx) => {
       if (!insideHerdr()) {
         ctx.ui.notify("Not running inside herdr.", "error");
         return;
       }
       await pruneMissingAgents();
-      const closePanes = args.trim() === "close";
+      const keepPanes = args.trim() === "keep";
       const targetAgents = [...agents];
       if (targetAgents.length === 0) {
         ctx.ui.notify("No tracked herdr subagents.", "info");
         return;
       }
-      if (closePanes) {
+
+      const failedToClose: SubagentPane[] = [];
+      if (!keepPanes) {
         for (const agent of targetAgents) {
-          await paneClose(agent.paneId).catch(() => undefined);
+          await paneClose(agent.paneId).catch(() => failedToClose.push(agent));
         }
       }
-      agents = [];
+
+      const failedIds = new Set(failedToClose.map((agent) => agent.paneId));
+      agents = keepPanes ? [] : failedToClose;
       persistState(pi, agents, messages);
-      ctx.ui.notify(`Cleared ${targetAgents.length} tracked herdr subagent(s).`, "info");
+
+      if (keepPanes) {
+        ctx.ui.notify(`Cleared tracking for ${targetAgents.length} herdr subagent(s); panes remain open.`, "info");
+      } else if (failedIds.size === 0) {
+        ctx.ui.notify(`Closed and cleared ${targetAgents.length} herdr subagent pane(s).`, "info");
+      } else {
+        ctx.ui.notify(`Closed and cleared ${targetAgents.length - failedIds.size} pane(s); ${failedIds.size} failed to close and remain tracked.`, "warning");
+      }
     },
   });
 }
