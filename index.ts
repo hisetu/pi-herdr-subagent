@@ -742,6 +742,29 @@ async function readCollectedOutput(
   return result;
 }
 
+// Pure helpers exported only to characterize the extension's existing behavior.
+export const __test = {
+  normalizeSpawnTasks,
+  buildPrompt,
+  encodeNotifyPayload,
+  decodeNotifyPayload,
+  shellQuote,
+  sanitizePaneTitle,
+  makePaneTitle,
+  buildPiArgs,
+  extractStructuredSections,
+  extractStructuredSummary,
+  extractTaskLine,
+  detectRoleFromOutput,
+  looksLikeSubagentOutput,
+  buildCollectSynthesis,
+  getLatestBatchId,
+  compactMessageBody,
+  renderMessageLine,
+  keepRecentMessages,
+  filterAgentsByBatch,
+};
+
 export default function herdrSubagentsExtension(pi: ExtensionAPI) {
   let agents: SubagentPane[] = [];
   let messages: SubagentMessage[] = [];
