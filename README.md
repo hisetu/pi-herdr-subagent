@@ -12,6 +12,8 @@ It adds these tools:
 
 - `herdr_subagents_spawn`
 - `herdr_subagents_status`
+- `herdr_subagents_message`
+- `herdr_subagents_messages`
 - `herdr_subagents_global_status`
 - `herdr_subagents_collect`
 - `herdr_subagents_interrupt`
@@ -44,11 +46,15 @@ The bundled prompt guidance proactively uses this workflow for non-trivial tasks
   - `review`
 - Support either one shared default role or per-task role overrides
 
+> **Shared-checkout warning:** all `implement` workers use the same checkout. Give them strictly non-overlapping files and edits; do not run parallel implement tasks that can modify the same area.
+
 ## Requirements
 
 - [pi](https://github.com/earendil-works/pi)
 - [herdr](https://github.com/ogulcancelik/herdr)
 - The current pi session must be running **inside a herdr pane**
+
+Session records are stored under `$PI_CODING_AGENT_DIR/extensions/herdr-subagents/sessions` when `PI_CODING_AGENT_DIR` is set, otherwise under the portable `~/.pi/agent` fallback.
 
 ## Install
 
@@ -86,7 +92,7 @@ Example:
   ],
   "role": "research",
   "thinking": "minimal",
-  "cwd": "/Users/lucas"
+  "cwd": "/path/to/project"
 }
 ```
 
@@ -100,7 +106,7 @@ Mixed-role example:
     { "task": "Fix one focused Compose state bug in the Android app.", "role": "implement" }
   ],
   "thinking": "minimal",
-  "cwd": "/Users/lucas"
+  "cwd": "/path/to/project"
 }
 ```
 
@@ -120,6 +126,30 @@ Example:
   "includeDone": true
 }
 ```
+
+### `herdr_subagents_message`
+
+Record a structured message and report display metadata on a target pane.
+
+This does **not** deliver the body into the target agent's conversation. It stores a metadata record for inspection and reports display-only pane metadata to herdr.
+
+Parameters:
+
+- `toPaneId: string` — target pane ID
+- `body: string` — body stored in the message record
+- `kind?: "finding" | "question" | "status" | "ack"` — defaults to `status`
+- `fromPaneId?: string` — optional logical sender pane ID
+- `messageId?: string` — optional caller-supplied record ID
+- `ttlMs?: number` — optional herdr display-metadata TTL
+
+### `herdr_subagents_messages`
+
+Show recent structured message records. These are display metadata records, not agent-conversation messages.
+
+Parameters:
+
+- `paneId?: string` — filter records involving one pane ID
+- `limit?: number` — maximum records to return, from 1 to 100
 
 ### `herdr_subagents_global_status`
 
@@ -226,6 +256,8 @@ Research workers are also instructed to:
 
 ### `implement`
 
+All implement workers share the same checkout. Their assigned files and edit regions must not overlap.
+
 Best for:
 
 - small focused code changes
@@ -292,7 +324,7 @@ Use this quick checklist after install and `/reload`:
     { "task": "Do not edit files; verify implement contract only", "role": "implement" }
   ],
   "thinking": "minimal",
-  "cwd": "/Users/lucas"
+  "cwd": "/path/to/project"
 }
 ```
 
@@ -346,6 +378,8 @@ Expected result:
 ## Notes
 
 - This package only works inside herdr-managed panes
+- `herdr_subagents_message` and `herdr_subagents_messages` manage display metadata records; they do not send prompts or content into an agent conversation
+- Parallel `implement` workers share one checkout and must never receive overlapping edits
 - The first worker opens to the right of the supervisor; later workers are balanced breadth-first only inside that right-side worker area, leaving the supervisor pane untouched
 - Use `herdr_subagents_global_status` when you are in a different supervisor/session and still want a rough workspace-wide subagent overview
 - First version supports either **one shared role per spawn call** or **per-task role overrides**

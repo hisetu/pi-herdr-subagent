@@ -3,13 +3,38 @@
   "version": "0.1.0",
   "private": false,
   "description": "Visible herdr-based pane subagents for pi",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hisetu/pi-herdr-subagent.git"
+  },
+  "homepage": "https://github.com/hisetu/pi-herdr-subagent#readme",
+  "bugs": {
+    "url": "https://github.com/hisetu/pi-herdr-subagent/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
+  "devDependencies": {
+    "@types/node": "^24.12.4",
+    "typescript": "^5.9.3"
+  },
   "pi": {
-    "extensions": ["./index.ts"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
   }
 }

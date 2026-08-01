@@ -12,6 +12,8 @@
 
 - `herdr_subagents_spawn`
 - `herdr_subagents_status`
+- `herdr_subagents_message`
+- `herdr_subagents_messages`
 - `herdr_subagents_global_status`
 - `herdr_subagents_collect`
 - `herdr_subagents_interrupt`
@@ -44,11 +46,15 @@
   - `review`
 - 支援整批共用預設角色，或每個 task 個別覆寫角色
 
+> **共用 checkout 警告：**所有 `implement` workers 都使用同一份 checkout。請分配完全不重疊的檔案與修改範圍；不要讓平行 implement tasks 修改同一區域。
+
 ## 需求
 
 - [pi](https://github.com/earendil-works/pi)
 - [herdr](https://github.com/ogulcancelik/herdr)
 - 目前的 pi session 必須執行在 **herdr pane 內**
+
+若有設定 `PI_CODING_AGENT_DIR`，session records 會存於 `$PI_CODING_AGENT_DIR/extensions/herdr-subagents/sessions`；否則使用可攜式 fallback `~/.pi/agent`。
 
 ## 安裝
 
@@ -86,7 +92,7 @@ pi install https://github.com/hisetu/pi-herdr-subagent
   ],
   "role": "research",
   "thinking": "minimal",
-  "cwd": "/Users/lucas"
+  "cwd": "/path/to/project"
 }
 ```
 
@@ -100,7 +106,7 @@ pi install https://github.com/hisetu/pi-herdr-subagent
     { "task": "Fix one focused Compose state bug in the Android app.", "role": "implement" }
   ],
   "thinking": "minimal",
-  "cwd": "/Users/lucas"
+  "cwd": "/path/to/project"
 }
 ```
 
@@ -112,6 +118,30 @@ pi install https://github.com/hisetu/pi-herdr-subagent
 
 - `includeDone?: boolean`
 - `latestOnly?: boolean` — 只顯示最新一批 spawned batch
+
+### `herdr_subagents_message`
+
+記錄結構化訊息，並在目標 pane 上回報顯示用 metadata。
+
+這個工具**不會**把 body 傳入目標 agent 的對話。它只會保存供查詢的 metadata record，並向 herdr 回報 display-only pane metadata。
+
+參數：
+
+- `toPaneId: string` — 目標 pane ID
+- `body: string` — 儲存在 message record 中的內容
+- `kind?: "finding" | "question" | "status" | "ack"` — 預設為 `status`
+- `fromPaneId?: string` — 可選的邏輯 sender pane ID
+- `messageId?: string` — 可選的自訂 record ID
+- `ttlMs?: number` — 可選的 herdr display-metadata TTL
+
+### `herdr_subagents_messages`
+
+顯示近期的結構化 message records。這些是顯示用 metadata records，不是 agent-conversation messages。
+
+參數：
+
+- `paneId?: string` — 篩選與指定 pane ID 有關的 records
+- `limit?: number` — 最多回傳 1 到 100 筆 records
 
 ### `herdr_subagents_global_status`
 
@@ -175,6 +205,8 @@ pi install https://github.com/hisetu/pi-herdr-subagent
 
 ### `implement`
 
+所有 implement workers 共用同一份 checkout；分配的檔案與修改區域不得重疊。
+
 適合：
 
 - 小範圍 code changes
@@ -216,6 +248,8 @@ pi install https://github.com/hisetu/pi-herdr-subagent
 ## 備註
 
 - 這個套件只能在 herdr 管理的 panes 內使用
+- `herdr_subagents_message` 與 `herdr_subagents_messages` 管理顯示用 metadata records；它們不會把 prompt 或內容送進 agent 對話
+- 平行 `implement` workers 共用同一份 checkout，絕對不能分配重疊修改
 - 第一個 worker 會開在 supervisor 右側；後續 worker 只在右側工作區內以廣度優先方式平均分配，不再分割 supervisor pane
 - 若你在不同 supervisor / session 中觀察，可用 `herdr_subagents_global_status` 看 workspace-wide 的粗略狀態
 - 支援整批共用角色，也支援 per-task role overrides

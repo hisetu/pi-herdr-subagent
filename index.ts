@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
 import { createConnection } from "node:net";
@@ -13,7 +13,7 @@ const DEFAULT_WAIT_TIMEOUT_MS = 300000;
 const DEFAULT_LINES = 30;
 const MAX_MESSAGES = 200;
 const MESSAGE_SOURCE = "pi-herdr-subagents";
-const SESSION_DIR = "/Users/lucas/.pi/agent/extensions/herdr-subagents/sessions";
+const SESSION_DIR = join(getAgentDir(), "extensions", "herdr-subagents", "sessions");
 
 type Role = "research" | "implement" | "review";
 type Thinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
