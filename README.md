@@ -384,7 +384,7 @@ Expected result:
 - Use `herdr_subagents_global_status` when you are in a different supervisor/session and still want a rough workspace-wide subagent overview
 - First version supports either **one shared role per spawn call** or **per-task role overrides**
 - Collection prefers reading the spawned subagent's **session output**, then falls back to pane output if needed
-- Missing panes are automatically pruned from tracked state
+- Status and collection keep missing panes visible as `missing`; cleanup-oriented operations may prune stale tracking
 - Use `latestOnly: true` when you only want the newest spawned batch
 - The extension sends a lightweight completion notify back to the supervisor pane when a tracked pane transitions into `idle` or `done`
 

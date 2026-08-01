@@ -254,7 +254,7 @@ pi install https://github.com/hisetu/pi-herdr-subagent
 - 若你在不同 supervisor / session 中觀察，可用 `herdr_subagents_global_status` 看 workspace-wide 的粗略狀態
 - 支援整批共用角色，也支援 per-task role overrides
 - collect 會優先讀取 spawned subagent 的 **session output**，不足時才 fallback 到 pane output
-- 缺失的 panes 會自動從 tracked state 移除
+- status 與 collect 會將缺失的 panes 保留並標示為 `missing`；cleanup 類操作可能清除過期的 tracking
 - 想只看最新一批時可用 `latestOnly: true`
 - extension 會在 tracked pane 進入 `idle` 或 `done` 時，回送輕量 completion notify 到 supervisor pane
 

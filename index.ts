@@ -81,6 +81,85 @@ type HerdrPaneListResult = {
   };
 };
 
+type CollectSource = "session" | "pane-fallback" | "missing";
+
+type CompletionPollOperations = {
+  insideHerdr: () => boolean;
+  getAgents: () => SubagentPane[];
+  listPanes: () => Promise<PaneInfo[]>;
+  notifyCompletion: (agent: SubagentPane, status: string) => Promise<void>;
+};
+
+function agentLifecycleKey(agent: SubagentPane): string {
+  return `${agent.batchId}:${agent.createdAt}:${agent.paneId}`;
+}
+
+function createCompletionPollState(operations: CompletionPollOperations) {
+  let polling = false;
+  let generation = 0;
+  let notificationEpoch = 0;
+  const observedActive = new Set<string>();
+  const notified = new Set<string>();
+
+  const reset = (preserveNotifications = false, preserveObservedActive = false) => {
+    generation += 1;
+    if (!preserveObservedActive) observedActive.clear();
+    if (!preserveNotifications) {
+      notified.clear();
+      notificationEpoch += 1;
+    }
+  };
+
+  const markActive = (agents: SubagentPane[]) => {
+    for (const agent of agents) observedActive.add(agentLifecycleKey(agent));
+  };
+
+  const poll = async (): Promise<boolean> => {
+    if (polling) return false;
+    polling = true;
+    const pollGeneration = generation;
+    const pollNotificationEpoch = notificationEpoch;
+    try {
+      const agents = operations.getAgents();
+      if (!operations.insideHerdr() || agents.length === 0) return true;
+      const panes = await operations.listPanes();
+      if (pollGeneration !== generation) return true;
+      const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
+
+      for (const agent of agents) {
+        if (pollGeneration !== generation) break;
+        const status = byId.get(agent.paneId)?.agent_status;
+        if (!status) continue;
+        const key = agentLifecycleKey(agent);
+        const settled = status === "idle" || status === "done";
+        if (!settled) {
+          observedActive.add(key);
+          continue;
+        }
+        if (!observedActive.has(key) || notified.has(key)) continue;
+        try {
+          await operations.notifyCompletion(agent, status);
+          if (pollNotificationEpoch === notificationEpoch) notified.add(key);
+        } catch {
+          // Keep this completion eligible for a later poll; one notification error
+          // must not stop polling or suppress the eventual notification.
+        }
+      }
+      return true;
+    } finally {
+      polling = false;
+    }
+  };
+
+  return {
+    poll,
+    reset,
+    isPolling: () => polling,
+    hasNotified: (agent: SubagentPane) => notified.has(agentLifecycleKey(agent)),
+    markActive,
+  };
+}
+
 const roleSchema = Type.Union([
   Type.Literal("research"),
   Type.Literal("implement"),
@@ -415,10 +494,6 @@ async function splitPane(
   const paneId = parseSplitPaneId(stdout);
   if (!paneId) throw new UnknownSplitOutcomeError("Failed to parse new pane id from herdr pane split output.");
   return paneId;
-}
-
-async function paneRun(paneId: string, command: string): Promise<void> {
-  await runHerdr(["pane", "run", paneId, command]);
 }
 
 async function paneRename(paneId: string, title: string): Promise<void> {
@@ -791,6 +866,17 @@ async function reportMessageMetadata(message: SubagentMessage): Promise<void> {
   });
 }
 
+async function reportCompletionMetadata(agent: SubagentPane): Promise<void> {
+  await herdrSocketCall("pane.report_metadata", {
+    pane_id: agent.supervisorPaneId,
+    source: MESSAGE_SOURCE,
+    title: `Subagent done: ${agent.paneId} (${agent.role})`,
+    custom_status: "subagent done",
+    ttl_ms: 10000,
+    seq: Date.now(),
+  });
+}
+
 function renderMessageLine(message: SubagentMessage): string {
   const statusText = message.delivery === "reported"
     ? "reported"
@@ -843,28 +929,48 @@ async function extractAssistantTextFromSession(sessionPath: string): Promise<str
   return undefined;
 }
 
-async function waitForAgents(targetPaneIds: string[], timeoutMs: number): Promise<void> {
+async function waitForAgents(
+  targetPaneIds: string[],
+  timeoutMs: number,
+  operations: { listPanes: () => Promise<PaneInfo[]>; sleep: (ms: number) => Promise<void> } = {
+    listPanes,
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  },
+): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const panes = await listPanes();
+    const panes = await operations.listPanes();
     const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
+    const missing = targetPaneIds.filter((paneId) => !byId.has(paneId));
+    if (missing.length > 0) {
+      throw new Error(`Cannot wait for missing tracked pane(s): ${missing.join(", ")}.`);
+    }
     const pending = targetPaneIds.filter((paneId) => {
       const status = byId.get(paneId)?.agent_status;
-      if (status == null) return false;
       return status !== "idle" && status !== "done";
     });
     if (pending.length === 0) return;
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await operations.sleep(2000);
   }
   throw new Error(`Timed out waiting for panes to settle after ${timeoutMs}ms.`);
+}
+
+function formatCollectSource(source: CollectSource, status: string): string {
+  if (source === "session") {
+    return status === "missing" ? "session record (tracked pane missing)" : "session record";
+  }
+  if (source === "pane-fallback") return "live pane fallback (no session result)";
+  return status === "missing"
+    ? "unavailable (tracked pane missing and no session result)"
+    : "unavailable (no session result or usable pane output)";
 }
 
 async function readCollectedOutput(
   agent: SubagentPane,
   lines: number,
   graceMs = 0,
-): Promise<{ output: string; source: "session" | "pane-fallback" | "missing" }> {
-  const tryRead = async (): Promise<{ output: string; source: "session" | "pane-fallback" | "missing" }> => {
+): Promise<{ output: string; source: CollectSource }> {
+  const tryRead = async (): Promise<{ output: string; source: CollectSource }> => {
     const sessionText = agent.sessionPath ? await extractAssistantTextFromSession(agent.sessionPath) : undefined;
     if (sessionText) return { output: sessionText, source: "session" };
 
@@ -913,13 +1019,16 @@ export const __test = {
   parseSplitPaneId,
   splitPane,
   UnknownSplitOutcomeError,
+  createCompletionPollState,
+  waitForAgents,
+  formatCollectSource,
+  formatStatusLine,
 };
 
 export default function herdrSubagentsExtension(pi: ExtensionAPI) {
   let agents: SubagentPane[] = [];
   let messages: SubagentMessage[] = [];
   let statusPollTimer: NodeJS.Timeout | undefined;
-  const lastKnownStatuses = new Map<string, string>();
 
   const refreshFromSession = (ctx: ExtensionContext) => {
     const restored = restoreState(ctx);
@@ -945,56 +1054,50 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
     }
   };
 
-  const pollStatusesOnce = async (ctx: ExtensionContext) => {
-    if (!insideHerdr() || agents.length === 0) return;
-    await pruneMissingAgents();
-    if (agents.length === 0) return;
-    const panes = await listPanes();
-    const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
-    for (const agent of agents) {
-      const status = byId.get(agent.paneId)?.agent_status;
-      if (!status) continue;
-      const previous = lastKnownStatuses.get(agent.paneId);
-      lastKnownStatuses.set(agent.paneId, status);
-      const becameDone = (status === "idle" || status === "done") && previous && previous !== status && previous !== "idle" && previous !== "done";
-      if (becameDone) {
-        const message = `Subagent done: ${agent.paneId} (${agent.role}) ${agent.task}`;
-        if (agent.supervisorPaneId && agent.supervisorPaneId !== process.env.HERDR_PANE_ID) {
-          const payload = encodeNotifyPayload({
-            paneId: agent.paneId,
-            role: agent.role,
-            task: agent.task,
-            status,
-          });
-          await paneRun(agent.supervisorPaneId, `/herdr-subagents-done ${payload}`).catch(() => {
-            ctx.ui.notify(message, "info");
-          });
-        } else {
-          ctx.ui.notify(message, "info");
-        }
+  let pollingContext: ExtensionContext | undefined;
+  const completionPoll = createCompletionPollState({
+    insideHerdr,
+    getAgents: () => agents,
+    listPanes,
+    async notifyCompletion(agent) {
+      const message = `Subagent done: ${agent.paneId} (${agent.role}) ${agent.task}`;
+      if (agent.supervisorPaneId && agent.supervisorPaneId !== process.env.HERDR_PANE_ID) {
+        await reportCompletionMetadata(agent);
+      } else {
+        pollingContext?.ui.notify(message, "info");
       }
-    }
+    },
+  });
+
+  const pollStatusesOnce = async (ctx: ExtensionContext) => {
+    pollingContext = ctx;
+    await completionPoll.poll();
   };
 
   const startStatusPolling = (ctx: ExtensionContext) => {
     stopStatusPolling();
+    pollingContext = ctx;
     statusPollTimer = setInterval(() => {
       void pollStatusesOnce(ctx).catch(() => undefined);
     }, 3000);
   };
 
   pi.on("session_start", async (_event, ctx) => {
+    completionPoll.reset();
     refreshFromSession(ctx);
     startStatusPolling(ctx);
   });
 
   pi.on("session_tree", async (_event, ctx) => {
+    completionPoll.reset(true, true);
     refreshFromSession(ctx);
     startStatusPolling(ctx);
   });
 
   pi.on("session_shutdown", async () => {
     stopStatusPolling();
+    pollingContext = undefined;
+    completionPoll.reset();
   });
 
   pi.registerTool({
@@ -1062,6 +1165,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           persistState(pi, agents, messages);
         },
       });
+      completionPoll.markActive(created);
 
       const text = [
         `Spawned ${created.length} herdr subagent pane(s).`,
@@ -1086,7 +1190,6 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
     parameters: statusParams,
     async execute(_toolCallId, params) {
       requireHerdr();
-      await pruneMissingAgents();
       const visibleAgents = filterAgentsByBatch(agents, params.latestOnly);
       const panes = await listPanes();
       const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
@@ -1188,7 +1291,6 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
     parameters: collectParams,
     async execute(_toolCallId, params) {
       requireHerdr();
-      await pruneMissingAgents();
       const targetAgents = filterAgentsByBatch(agents, params.latestOnly);
       if (targetAgents.length === 0) {
         return {
@@ -1219,7 +1321,12 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
         const status = byId.get(agent.paneId)?.agent_status ?? "missing";
         summaries.push({ ...agent, status, excerpt, sections, source });
         synthesisItems.push({ paneId: agent.paneId, role: agent.role, task: agent.task, sections, excerpt, status });
-        textBlocks.push([`## ${agent.paneId} [${status}] (${agent.role})`, `Task: ${agent.task}`, excerpt].join("\n"));
+        textBlocks.push([
+          `## ${agent.paneId} [${status}] (${agent.role})`,
+          `Task: ${agent.task}`,
+          `Result source: ${formatCollectSource(source, status)}`,
+          excerpt,
+        ].join("\n"));
       }
 
       const synthesis = buildCollectSynthesis(synthesisItems);
@@ -1408,7 +1515,6 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
         ctx.ui.notify("Not running inside herdr.", "error");
         return;
       }
-      await pruneMissingAgents();
       const panes = await listPanes();
       const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
       const lines = agents.length
@@ -1425,7 +1531,6 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
         ctx.ui.notify("Not running inside herdr.", "error");
         return;
       }
-      await pruneMissingAgents();
       const wait = args.trim() === "wait";
       const collectGraceMs = wait ? 30000 : 0;
       if (wait) {
@@ -1433,13 +1538,16 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           ctx.ui.notify(String(error), "warning");
         });
       }
+      const panes = await listPanes();
+      const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
       const blocks: string[] = [];
       for (const agent of agents) {
-        const { output } = await readCollectedOutput(agent, DEFAULT_LINES, collectGraceMs);
+        const { output, source } = await readCollectedOutput(agent, DEFAULT_LINES, collectGraceMs);
         const excerpt = extractStructuredSummary(agent.role, output)
           ?? extractErrorSummary(output)
           ?? (output ? clip(output) : "(no final assistant text recorded)");
-        blocks.push(`${agent.paneId} (${agent.role}) ${agent.task}\n${excerpt}`);
+        const status = byId.get(agent.paneId)?.agent_status ?? "missing";
+        blocks.push(`${agent.paneId} [${status}] (${agent.role}) ${agent.task}\nResult source: ${formatCollectSource(source, status)}\n${excerpt}`);
       }
       ctx.ui.notify(blocks.join("\n\n") || "No tracked herdr subagents.", "info");
     },

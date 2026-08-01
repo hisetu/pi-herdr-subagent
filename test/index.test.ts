@@ -29,6 +29,10 @@ const {
   parseSplitPaneId,
   splitPane,
   UnknownSplitOutcomeError,
+  createCompletionPollState,
+  waitForAgents,
+  formatCollectSource,
+  formatStatusLine,
 } = __test;
 
 describe("task normalization and role prompts", () => {
@@ -455,6 +459,234 @@ describe("transactional subagent spawning", () => {
     assert.deepEqual(await cleanup(), []);
     assert.deepEqual(await cleanup(), []);
     assert.equal(closeAttempts, 2);
+  });
+});
+
+describe("completion polling lifecycle", () => {
+  const trackedAgent = {
+    paneId: "pane-1",
+    role: "research" as const,
+    task: "inspect lifecycle",
+    cwd: "/repo",
+    createdAt: 1,
+    batchId: "batch-1",
+    supervisorPaneId: "supervisor",
+  };
+
+  const pane = (status: string) => ({ pane_id: "pane-1", agent_status: status });
+
+  test("prevents overlapping polls", async () => {
+    let releaseList!: (panes: Array<{ pane_id: string; agent_status: string }>) => void;
+    let listCalls = 0;
+    const blockedList = new Promise<Array<{ pane_id: string; agent_status: string }>>((resolve) => {
+      releaseList = resolve;
+    });
+    const poller = createCompletionPollState({
+      insideHerdr: () => true,
+      getAgents: () => [trackedAgent],
+      listPanes: async () => {
+        listCalls += 1;
+        return blockedList;
+      },
+      notifyCompletion: async () => undefined,
+    });
+
+    const first = poller.poll();
+    assert.equal(await poller.poll(), false);
+    assert.equal(listCalls, 1);
+    releaseList([pane("working")]);
+    assert.equal(await first, true);
+    assert.equal(poller.isPolling(), false);
+  });
+
+  test("reset invalidates an in-flight poll without allowing a replacement to overlap", async () => {
+    let releaseList!: (panes: Array<{ pane_id: string; agent_status: string }>) => void;
+    let notifications = 0;
+    const blockedList = new Promise<Array<{ pane_id: string; agent_status: string }>>((resolve) => {
+      releaseList = resolve;
+    });
+    const poller = createCompletionPollState({
+      insideHerdr: () => true,
+      getAgents: () => [trackedAgent],
+      listPanes: async () => blockedList,
+      notifyCompletion: async () => { notifications += 1; },
+    });
+
+    const stalePoll = poller.poll();
+    poller.reset();
+    assert.equal(await poller.poll(), false);
+    releaseList([pane("done")]);
+    await stalePoll;
+
+    assert.equal(notifications, 0);
+    assert.equal(poller.isPolling(), false);
+  });
+
+  test("notifies a newly spawned agent that settles before its first poll", async () => {
+    let notifications = 0;
+    const poller = createCompletionPollState({
+      insideHerdr: () => true,
+      getAgents: () => [trackedAgent],
+      listPanes: async () => [pane("done")],
+      notifyCompletion: async () => { notifications += 1; },
+    });
+
+    poller.markActive([trackedAgent]);
+    await poller.poll();
+    await poller.poll();
+
+    assert.equal(notifications, 1);
+  });
+
+  test("preserves active observations across a session-tree reset", async () => {
+    let status = "working";
+    let notifications = 0;
+    const poller = createCompletionPollState({
+      insideHerdr: () => true,
+      getAgents: () => [trackedAgent],
+      listPanes: async () => [pane(status)],
+      notifyCompletion: async () => { notifications += 1; },
+    });
+
+    await poller.poll();
+    poller.reset(true, true);
+    status = "done";
+    await poller.poll();
+
+    assert.equal(notifications, 1);
+  });
+
+  test("records an in-flight successful notification across a session-tree reset", async () => {
+    let releaseNotification!: () => void;
+    let notifications = 0;
+    const notification = new Promise<void>((resolve) => { releaseNotification = resolve; });
+    const poller = createCompletionPollState({
+      insideHerdr: () => true,
+      getAgents: () => [trackedAgent],
+      listPanes: async () => [pane("done")],
+      notifyCompletion: async () => {
+        notifications += 1;
+        await notification;
+      },
+    });
+
+    poller.markActive([trackedAgent]);
+    const inFlight = poller.poll();
+    await Promise.resolve();
+    poller.reset(true, true);
+    releaseNotification();
+    await inFlight;
+    await poller.poll();
+
+    assert.equal(notifications, 1);
+    assert.equal(poller.hasNotified(trackedAgent), true);
+  });
+
+  test("does not resurrect notification state after a full shutdown reset", async () => {
+    let releaseNotification!: () => void;
+    const notification = new Promise<void>((resolve) => { releaseNotification = resolve; });
+    const poller = createCompletionPollState({
+      insideHerdr: () => true,
+      getAgents: () => [trackedAgent],
+      listPanes: async () => [pane("done")],
+      notifyCompletion: async () => notification,
+    });
+
+    poller.markActive([trackedAgent]);
+    const inFlight = poller.poll();
+    await Promise.resolve();
+    poller.reset();
+    releaseNotification();
+    await inFlight;
+
+    assert.equal(poller.hasNotified(trackedAgent), false);
+  });
+
+  test("deduplicates completion and retries a failed notification", async () => {
+    let status = "working";
+    let notifyAttempts = 0;
+    const poller = createCompletionPollState({
+      insideHerdr: () => true,
+      getAgents: () => [trackedAgent],
+      listPanes: async () => [pane(status)],
+      notifyCompletion: async () => {
+        notifyAttempts += 1;
+        if (notifyAttempts === 1) throw new Error("notify failed");
+      },
+    });
+
+    await poller.poll();
+    status = "done";
+    await poller.poll();
+    assert.equal(poller.hasNotified(trackedAgent), false);
+    await poller.poll();
+    await poller.poll();
+    status = "idle";
+    await poller.poll();
+
+    assert.equal(notifyAttempts, 2);
+    assert.equal(poller.hasNotified(trackedAgent), true);
+  });
+
+  test("recovers after a list error and reset clears stale transition state", async () => {
+    let listCalls = 0;
+    let status = "working";
+    let notifications = 0;
+    const poller = createCompletionPollState({
+      insideHerdr: () => true,
+      getAgents: () => [trackedAgent],
+      listPanes: async () => {
+        listCalls += 1;
+        if (listCalls === 1) throw new Error("temporary list failure");
+        return [pane(status)];
+      },
+      notifyCompletion: async () => { notifications += 1; },
+    });
+
+    await assert.rejects(poller.poll(), /temporary list failure/);
+    assert.equal(poller.isPolling(), false);
+    await poller.poll();
+    poller.reset();
+    status = "done";
+    await poller.poll();
+    assert.equal(notifications, 0, "reset completion must not use stale active state");
+    status = "working";
+    await poller.poll();
+    status = "idle";
+    await poller.poll();
+    assert.equal(notifications, 1);
+  });
+});
+
+describe("missing pane and result-source reporting", () => {
+  test("does not treat a missing pane as a settled completion", async () => {
+    await assert.rejects(
+      waitForAgents(["missing-pane"], 1000, {
+        listPanes: async () => [],
+        sleep: async () => undefined,
+      }),
+      /Cannot wait for missing tracked pane\(s\): missing-pane/,
+    );
+  });
+
+  test("distinguishes missing status plus session, pane fallback, and unavailable sources", () => {
+    const trackedAgent = {
+      paneId: "gone",
+      role: "review" as const,
+      task: "review lifecycle",
+      cwd: "/repo",
+      createdAt: 1,
+      batchId: "batch-1",
+      supervisorPaneId: "supervisor",
+    };
+    assert.match(formatStatusLine(trackedAgent), /^- gone \[missing\] \(review\)/);
+    assert.equal(formatCollectSource("session", "done"), "session record");
+    assert.equal(formatCollectSource("session", "missing"), "session record (tracked pane missing)");
+    assert.equal(formatCollectSource("pane-fallback", "idle"), "live pane fallback (no session result)");
+    assert.equal(
+      formatCollectSource("missing", "missing"),
+      "unavailable (tracked pane missing and no session result)",
+    );
   });
 });
 
