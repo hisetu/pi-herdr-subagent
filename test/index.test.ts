@@ -24,6 +24,11 @@ const {
   renderMessageLine,
   keepRecentMessages,
   filterAgentsByBatch,
+  cleanupCreatedPanes,
+  spawnSubagentsTransactional,
+  parseSplitPaneId,
+  splitPane,
+  UnknownSplitOutcomeError,
 } = __test;
 
 describe("task normalization and role prompts", () => {
@@ -88,6 +93,20 @@ describe("payload, quoting, title, and CLI argument helpers", () => {
     assert.deepEqual(buildPiArgs("session.jsonl", "provider/model", "high"), [
       "--session", "session.jsonl", "--model", "provider/model", "--thinking", "high",
     ]);
+  });
+
+  test("recovers a pane ID from valid Herdr split output", async () => {
+    const output = JSON.stringify({ result: { pane: { pane_id: "pane-1" } } });
+    assert.equal(parseSplitPaneId(output), "pane-1");
+    assert.equal(parseSplitPaneId("truncated output"), undefined);
+    assert.equal(parseSplitPaneId(JSON.stringify({ result: {} })), undefined);
+
+    const cliError = Object.assign(new Error("nonzero exit"), { stdout: output });
+    assert.equal(await splitPane("source", "right", "/repo", async () => { throw cliError; }), "pane-1");
+    await assert.rejects(
+      splitPane("source", "right", "/repo", async () => { throw new Error("no output"); }),
+      UnknownSplitOutcomeError,
+    );
   });
 });
 
@@ -173,6 +192,269 @@ describe("structured output parsing and synthesis", () => {
     assert.match(synthesis ?? "", /- pane-r: Unknowns: None\./);
     assert.match(synthesis ?? "", /Suggested next step: Review the implementation-oriented pane results first/);
     assert.equal(buildCollectSynthesis([]), undefined);
+  });
+});
+
+describe("transactional subagent spawning", () => {
+  type SpawnOperations = Parameters<typeof spawnSubagentsTransactional>[3];
+
+  const tasks = [
+    { task: "first task", role: "research" as const },
+    { task: "second task", role: "review" as const },
+  ];
+
+  function makeHarness(
+    failAt?: "split" | "rename" | "start" | "prompt" | "close",
+    liveAfterClose = false,
+    initialTracked: Parameters<SpawnOperations["setTracked"]>[0] = [],
+  ) {
+    let tracked: Parameters<SpawnOperations["setTracked"]>[0] = [...initialTracked];
+    const snapshots: string[][] = [];
+    const calls: string[] = [];
+    let nextPane = 1;
+
+    const operations: SpawnOperations = {
+      async split(source, direction) {
+        calls.push(`split:${source}:${direction}`);
+        if (failAt === "split") throw new Error("split failed");
+        return `pane-${nextPane++}`;
+      },
+      async prepare(item, index) {
+        return {
+          role: item.role,
+          task: item.task,
+          cwd: "/repo",
+          createdAt: index + 1,
+          batchId: "batch-1",
+          supervisorPaneId: "supervisor",
+          sessionPath: `/sessions/${index}.jsonl`,
+          agentName: `agent-${index}`,
+          command: `pi --session /sessions/${index}.jsonl`,
+        };
+      },
+      async rename(agent) {
+        calls.push(`rename:${agent.paneId}`);
+        if (failAt === "rename") throw new Error("rename failed");
+      },
+      async start(agent) {
+        calls.push(`start:${agent.paneId}`);
+        if (failAt === "start") throw new Error("start failed");
+      },
+      async prompt(agent) {
+        calls.push(`prompt:${agent.paneId}`);
+        if (failAt === "prompt") throw new Error("prompt failed");
+      },
+      async close(paneId) {
+        calls.push(`close:${paneId}`);
+        if (failAt === "close") throw new Error("close failed");
+      },
+      async listPaneIds() {
+        calls.push("list");
+        return liveAfterClose ? new Set(["pane-1"]) : new Set<string>();
+      },
+      getTracked: () => tracked,
+      setTracked(agents) {
+        tracked = agents;
+        snapshots.push(agents.map((agent) => agent.paneId));
+      },
+    };
+
+    return { operations, calls, snapshots, getTracked: () => tracked };
+  }
+
+  test("tracks each pane before rename and completes the existing split layout", async () => {
+    const harness = makeHarness();
+
+    const created = await spawnSubagentsTransactional(tasks, "supervisor", "/repo", harness.operations);
+
+    assert.deepEqual(created.map((agent) => agent.paneId), ["pane-1", "pane-2"]);
+    assert.deepEqual(harness.snapshots, [["pane-1"], ["pane-1", "pane-2"]]);
+    assert.deepEqual(harness.calls, [
+      "split:supervisor:right",
+      "rename:pane-1",
+      "start:pane-1",
+      "prompt:pane-1",
+      "split:pane-1:down",
+      "rename:pane-2",
+      "start:pane-2",
+      "prompt:pane-2",
+    ]);
+  });
+
+  for (const failure of ["rename", "start", "prompt"] as const) {
+    test(`closes and untracks the pane when ${failure} fails`, async () => {
+      const harness = makeHarness(failure);
+
+      await assert.rejects(
+        spawnSubagentsTransactional(tasks, "supervisor", "/repo", harness.operations),
+        new RegExp(`Failed to spawn herdr subagents: ${failure} failed.*All panes created by this call were cleaned up`),
+      );
+
+      assert.deepEqual(harness.getTracked(), []);
+      assert.deepEqual(harness.snapshots, [["pane-1"], []]);
+      assert.ok(harness.calls.includes("close:pane-1"));
+    });
+  }
+
+  test("best-effort closes every pane created before a later task fails", async () => {
+    const harness = makeHarness();
+    let promptCount = 0;
+    harness.operations.prompt = async (agent) => {
+      harness.calls.push(`prompt:${agent.paneId}`);
+      promptCount += 1;
+      if (promptCount === 2) throw new Error("second prompt failed");
+    };
+
+    await assert.rejects(
+      spawnSubagentsTransactional(tasks, "supervisor", "/repo", harness.operations),
+      /second prompt failed.*All panes created by this call were cleaned up/,
+    );
+
+    assert.deepEqual(harness.calls.slice(-2), ["close:pane-1", "close:pane-2"]);
+    assert.deepEqual(harness.getTracked(), []);
+  });
+
+  test("retains complete pane ownership when cleanup close fails", async () => {
+    const harness = makeHarness("close", true);
+    harness.operations.prompt = async (agent) => {
+      harness.calls.push(`prompt:${agent.paneId}`);
+      throw new Error("prompt failed");
+    };
+
+    await assert.rejects(
+      spawnSubagentsTransactional(tasks, "supervisor", "/repo", harness.operations),
+      /prompt failed.*remain tracked: pane-1/,
+    );
+
+    assert.deepEqual(harness.getTracked(), [{
+      paneId: "pane-1",
+      role: "research",
+      task: "first task",
+      cwd: "/repo",
+      createdAt: 1,
+      batchId: "batch-1",
+      supervisorPaneId: "supervisor",
+      sessionPath: "/sessions/0.jsonl",
+      agentName: "agent-0",
+      command: "pi --session /sessions/0.jsonl",
+    }]);
+    assert.deepEqual(harness.snapshots, [["pane-1"], ["pane-1"]]);
+    assert.deepEqual(harness.calls.slice(-2), ["close:pane-1", "list"]);
+  });
+
+  test("untracks a pane whose close reports failure but liveness confirms it is missing", async () => {
+    const harness = makeHarness("close", false);
+    harness.operations.start = async () => { throw new Error("start failed"); };
+
+    await assert.rejects(
+      spawnSubagentsTransactional(tasks, "supervisor", "/repo", harness.operations),
+      /start failed.*All panes created by this call were cleaned up/,
+    );
+
+    assert.deepEqual(harness.getTracked(), []);
+    assert.deepEqual(harness.snapshots.at(-1), []);
+  });
+
+  test("persists unchanged tracking and closes nothing when split fails", async () => {
+    const harness = makeHarness("split");
+
+    await assert.rejects(
+      spawnSubagentsTransactional(tasks, "supervisor", "/repo", harness.operations),
+      /split failed.*All panes created by this call were cleaned up/,
+    );
+
+    assert.deepEqual(harness.calls, ["split:supervisor:right"]);
+    assert.deepEqual(harness.snapshots, [[]]);
+  });
+
+  test("does not claim cleanup when split creation cannot be determined", async () => {
+    const harness = makeHarness();
+    harness.operations.split = async () => {
+      throw new UnknownSplitOutcomeError("split output was malformed");
+    };
+
+    await assert.rejects(
+      spawnSubagentsTransactional(tasks, "supervisor", "/repo", harness.operations),
+      /split output was malformed.*Unable to determine whether the failed split created an additional untracked pane; inspect Herdr/,
+    );
+
+    assert.deepEqual(harness.getTracked(), []);
+  });
+
+  test("reports both retained panes and an ambiguous later split", async () => {
+    const harness = makeHarness("close", true);
+    let splitCount = 0;
+    const split = harness.operations.split;
+    harness.operations.split = async (...args) => {
+      splitCount += 1;
+      if (splitCount === 2) throw new UnknownSplitOutcomeError("second split was ambiguous");
+      return split(...args);
+    };
+
+    await assert.rejects(
+      spawnSubagentsTransactional(tasks, "supervisor", "/repo", harness.operations),
+      /second split was ambiguous.*remain tracked: pane-1.*additional untracked pane; inspect Herdr/,
+    );
+
+    assert.deepEqual(harness.getTracked().map((agent) => agent.paneId), ["pane-1"]);
+  });
+
+  test("preserves agents tracked before the failed batch", async () => {
+    const existing = {
+      paneId: "existing",
+      role: "research" as const,
+      task: "existing task",
+      cwd: "/repo",
+      createdAt: 0,
+      batchId: "old-batch",
+      supervisorPaneId: "supervisor",
+    };
+    const harness = makeHarness("rename", false, [existing]);
+
+    await assert.rejects(
+      spawnSubagentsTransactional(tasks, "supervisor", "/repo", harness.operations),
+      /rename failed.*All panes created by this call were cleaned up/,
+    );
+
+    assert.deepEqual(harness.getTracked(), [existing]);
+  });
+
+  test("cleans up and retries final state persistence when provisional persistence fails", async () => {
+    const harness = makeHarness();
+    const setTracked = harness.operations.setTracked;
+    let attempts = 0;
+    harness.operations.setTracked = (agents) => {
+      setTracked(agents);
+      attempts += 1;
+      if (attempts === 1) throw new Error("persist failed");
+    };
+
+    await assert.rejects(
+      spawnSubagentsTransactional(tasks, "supervisor", "/repo", harness.operations),
+      /persist failed.*All panes created by this call were cleaned up/,
+    );
+
+    assert.deepEqual(harness.calls, ["split:supervisor:right", "close:pane-1"]);
+    assert.deepEqual(harness.getTracked(), []);
+    assert.deepEqual(harness.snapshots, [["pane-1"], []]);
+  });
+
+  test("cleanup is idempotent for panes already missing", async () => {
+    const pane = { ...await makeHarness().operations.prepare(tasks[0], 0), paneId: "pane-1" };
+    let closeAttempts = 0;
+    const cleanup = () => cleanupCreatedPanes([pane], {
+      async close() {
+        closeAttempts += 1;
+        throw new Error("pane missing");
+      },
+      async listPaneIds() {
+        return new Set();
+      },
+    });
+
+    assert.deepEqual(await cleanup(), []);
+    assert.deepEqual(await cleanup(), []);
+    assert.equal(closeAttempts, 2);
   });
 });
 

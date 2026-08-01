@@ -258,17 +258,162 @@ type SplitTarget = {
   depth: number;
 };
 
+class UnknownSplitOutcomeError extends Error {}
+
+type SpawnedSubagentPane = SubagentPane & {
+  sessionPath: string;
+  agentName: string;
+  command: string;
+};
+
+type SpawnTransactionOperations = {
+  split: (sourcePaneId: string, direction: SplitDirection, cwd: string) => Promise<string>;
+  prepare: (item: NormalizedSpawnTask, index: number) => Promise<Omit<SpawnedSubagentPane, "paneId">>;
+  rename: (agent: SpawnedSubagentPane) => Promise<void>;
+  start: (agent: SpawnedSubagentPane) => Promise<void>;
+  prompt: (agent: SpawnedSubagentPane) => Promise<void>;
+  close: (paneId: string) => Promise<void>;
+  listPaneIds: () => Promise<Set<string>>;
+  getTracked: () => SubagentPane[];
+  setTracked: (agents: SubagentPane[]) => void;
+};
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function cleanupCreatedPanes(
+  created: SubagentPane[],
+  operations: Pick<SpawnTransactionOperations, "close" | "listPaneIds">,
+): Promise<SubagentPane[]> {
+  const closeFailures: SubagentPane[] = [];
+  for (const agent of created) {
+    try {
+      await operations.close(agent.paneId);
+    } catch {
+      closeFailures.push(agent);
+    }
+  }
+
+  if (closeFailures.length === 0) return [];
+
+  try {
+    const livePaneIds = await operations.listPaneIds();
+    return closeFailures.filter((agent) => livePaneIds.has(agent.paneId));
+  } catch {
+    // If liveness cannot be confirmed, retain ownership so a later clear can retry safely.
+    return closeFailures;
+  }
+}
+
+async function spawnSubagentsTransactional(
+  tasks: NormalizedSpawnTask[],
+  sourcePane: string,
+  cwd: string,
+  operations: SpawnTransactionOperations,
+): Promise<SpawnedSubagentPane[]> {
+  const created: SpawnedSubagentPane[] = [];
+  const workerSplitTargets: SplitTarget[] = [];
+
+  try {
+    for (const [index, item] of tasks.entries()) {
+      const target = index === 0 ? undefined : workerSplitTargets.shift();
+      if (index > 0 && !target) {
+        throw new Error("No worker pane available for the next subagent.");
+      }
+
+      const targetPaneId = target?.paneId ?? sourcePane;
+      const direction: SplitDirection = !target
+        ? "right"
+        : target.depth % 2 === 0
+          ? "down"
+          : "right";
+      const preparedAgent = await operations.prepare(item, index);
+      const paneId = await operations.split(targetPaneId, direction, cwd);
+      const agent: SpawnedSubagentPane = { ...preparedAgent, paneId };
+
+      // Record ownership before any operation on the new pane can fail.
+      created.push(agent);
+      operations.setTracked([...operations.getTracked(), agent]);
+
+      if (!target) {
+        workerSplitTargets.push({ paneId, depth: 0 });
+      } else {
+        const childDepth = target.depth + 1;
+        workerSplitTargets.push(
+          { paneId: targetPaneId, depth: childDepth },
+          { paneId, depth: childDepth },
+        );
+      }
+
+      await operations.rename(agent);
+      await operations.start(agent);
+      await operations.prompt(agent);
+    }
+
+    return created;
+  } catch (error) {
+    const retained = await cleanupCreatedPanes(created, operations);
+    const createdIds = new Set(created.map((agent) => agent.paneId));
+    const nextTracked = [
+      ...operations.getTracked().filter((agent) => !createdIds.has(agent.paneId)),
+      ...retained,
+    ];
+
+    let persistenceFailure: unknown;
+    try {
+      operations.setTracked(nextTracked);
+    } catch (persistError) {
+      persistenceFailure = persistError;
+    }
+
+    const retainedText = retained.length > 0
+      ? ` Cleanup could not close pane(s) that remain tracked: ${retained.map((agent) => agent.paneId).join(", ")}.`
+      : error instanceof UnknownSplitOutcomeError
+        ? " All panes created by this call with known IDs were cleaned up."
+        : " All panes created by this call were cleaned up.";
+    const unknownSplitText = error instanceof UnknownSplitOutcomeError
+      ? " Unable to determine whether the failed split created an additional untracked pane; inspect Herdr."
+      : "";
+    const persistenceText = persistenceFailure
+      ? ` Persisting cleanup state also failed: ${errorMessage(persistenceFailure)}.`
+      : "";
+    throw new Error(`Failed to spawn herdr subagents: ${errorMessage(error)}.${retainedText}${unknownSplitText}${persistenceText}`, { cause: error });
+  }
+}
+
+function parseSplitPaneId(output: string): string | undefined {
+  try {
+    const parsed = JSON.parse(output) as { result?: { pane?: { pane_id?: string } } };
+    return parsed.result?.pane?.pane_id;
+  } catch {
+    return undefined;
+  }
+}
+
 async function splitPane(
   sourcePaneId: string,
   direction: SplitDirection,
   cwd?: string,
+  execute: (args: string[]) => Promise<string> = runHerdr,
 ): Promise<string> {
   const args = ["pane", "split", sourcePaneId, "--direction", direction, "--no-focus"];
   if (cwd) args.push("--cwd", cwd);
-  const stdout = await runHerdr(args);
-  const parsed = JSON.parse(stdout) as { result?: { pane?: { pane_id?: string } } };
-  const paneId = parsed.result?.pane?.pane_id;
-  if (!paneId) throw new Error("Failed to parse new pane id from herdr pane split output.");
+
+  let stdout: string;
+  try {
+    stdout = await execute(args);
+  } catch (error) {
+    const errorStdout = typeof error === "object" && error !== null && "stdout" in error
+      ? String((error as { stdout?: unknown }).stdout ?? "")
+      : "";
+    const recoveredPaneId = parseSplitPaneId(errorStdout);
+    if (recoveredPaneId) return recoveredPaneId;
+    throw new UnknownSplitOutcomeError(`Herdr split failed without a recoverable pane ID: ${errorMessage(error)}`, { cause: error });
+  }
+
+  const paneId = parseSplitPaneId(stdout);
+  if (!paneId) throw new UnknownSplitOutcomeError("Failed to parse new pane id from herdr pane split output.");
   return paneId;
 }
 
@@ -763,6 +908,11 @@ export const __test = {
   renderMessageLine,
   keepRecentMessages,
   filterAgentsByBatch,
+  cleanupCreatedPanes,
+  spawnSubagentsTransactional,
+  parseSplitPaneId,
+  splitPane,
+  UnknownSplitOutcomeError,
 };
 
 export default function herdrSubagentsExtension(pi: ExtensionAPI) {
@@ -868,64 +1018,50 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       const defaultRole: Role = params.role ?? "research";
       const cwd = params.cwd ?? ctx.cwd;
       const sourcePane = process.env.HERDR_PANE_ID as string;
-      const created: SubagentPane[] = [];
       const batchId = makeBatchId();
       const normalizedTasks = normalizeSpawnTasks(params.tasks as Array<string | SpawnTask>, defaultRole, params.model);
 
       await fs.mkdir(SESSION_DIR, { recursive: true });
 
-      const workerSplitTargets: SplitTarget[] = [];
-      for (const [index, item] of normalizedTasks.entries()) {
-        const target = index === 0 ? undefined : workerSplitTargets.shift();
-        if (index > 0 && !target) {
-          throw new Error("No worker pane available for the next subagent.");
-        }
-
-        const targetPaneId = target?.paneId ?? sourcePane;
-        const direction: SplitDirection = !target
-          ? "right"
-          : target.depth % 2 === 0
-            ? "down"
-            : "right";
-        const paneId = await splitPane(targetPaneId, direction, cwd);
-
-        if (!target) {
-          workerSplitTargets.push({ paneId, depth: 0 });
-        } else {
-          const childDepth = target.depth + 1;
-          workerSplitTargets.push(
-            { paneId: targetPaneId, depth: childDepth },
-            { paneId, depth: childDepth },
-          );
-        }
-
-        const sessionPath = makeSessionPath();
-        await fs.mkdir(dirname(sessionPath), { recursive: true });
-        const agentName = makeAgentName(item.role, index, batchId);
-        const piArgs = buildPiArgs(sessionPath, item.model, params.thinking);
-        const command = ["pi", ...piArgs].map(shellQuote).join(" ");
-
-        await paneRename(paneId, makePaneTitle(item.role, item.task));
-        await startPiAgent(paneId, agentName, piArgs);
-        await agentPrompt(agentName, buildPrompt(item.role, item.task));
-        created.push({
-          paneId,
-          role: item.role,
-          task: item.task,
-          cwd,
-          createdAt: Date.now(),
-          batchId,
-          supervisorPaneId: sourcePane,
-          sessionPath,
-          agentName,
-          model: item.model,
-          thinking: params.thinking,
-          command,
-        });
-      }
-
-      agents = [...agents, ...created];
-      persistState(pi, agents, messages);
+      const created = await spawnSubagentsTransactional(normalizedTasks, sourcePane, cwd, {
+        split: splitPane,
+        async prepare(item, index) {
+          const sessionPath = makeSessionPath();
+          await fs.mkdir(dirname(sessionPath), { recursive: true });
+          const agentName = makeAgentName(item.role, index, batchId);
+          const piArgs = buildPiArgs(sessionPath, item.model, params.thinking);
+          const command = ["pi", ...piArgs].map(shellQuote).join(" ");
+          return {
+            role: item.role,
+            task: item.task,
+            cwd,
+            createdAt: Date.now(),
+            batchId,
+            supervisorPaneId: sourcePane,
+            sessionPath,
+            agentName,
+            model: item.model,
+            thinking: params.thinking,
+            command,
+          };
+        },
+        rename: (agent) => paneRename(agent.paneId, makePaneTitle(agent.role, agent.task)),
+        start: (agent) => startPiAgent(
+          agent.paneId,
+          agent.agentName,
+          buildPiArgs(agent.sessionPath, agent.model, agent.thinking),
+        ),
+        prompt: (agent) => agentPrompt(agent.agentName, buildPrompt(agent.role, agent.task)),
+        close: paneClose,
+        async listPaneIds() {
+          return new Set((await listPanes()).map((pane) => pane.pane_id));
+        },
+        getTracked: () => agents,
+        setTracked(nextAgents) {
+          agents = nextAgents;
+          persistState(pi, agents, messages);
+        },
+      });
 
       const text = [
         `Spawned ${created.length} herdr subagent pane(s).`,
