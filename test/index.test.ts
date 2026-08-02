@@ -33,6 +33,8 @@ const {
   waitForAgents,
   formatCollectSource,
   formatStatusLine,
+  herdrErrorCode,
+  startPiAgent,
 } = __test;
 
 describe("task normalization and role prompts", () => {
@@ -97,6 +99,77 @@ describe("payload, quoting, title, and CLI argument helpers", () => {
     assert.deepEqual(buildPiArgs("session.jsonl", "provider/model", "high"), [
       "--session", "session.jsonl", "--model", "provider/model", "--thinking", "high",
     ]);
+  });
+
+  test("retries agent startup only while a new pane shell is busy", async () => {
+    const herdrError = (code: string, message = code) => Object.assign(new Error(message), {
+      stdout: JSON.stringify({ error: { code, message }, id: "cli:agent:start" }),
+    });
+
+    let attempts = 0;
+    let sleeps = 0;
+    await startPiAgent("pane-1", "agent-1", ["--session", "session.jsonl"], {
+      async run() {
+        attempts += 1;
+        if (attempts < 3) throw herdrError("agent_pane_busy");
+        return "";
+      },
+      async sleep(ms) {
+        assert.equal(ms, 100);
+        sleeps += 1;
+      },
+    });
+    assert.equal(attempts, 3);
+    assert.equal(sleeps, 2);
+
+    const misleadingError = herdrError("invalid_model", "argument contains agent_pane_busy");
+    assert.equal(herdrErrorCode(misleadingError), "invalid_model");
+    assert.equal(
+      herdrErrorCode(new Error('Command failed: pi --model {"error":{"code":"agent_pane_busy"}}')),
+      undefined,
+    );
+    let nonBusyAttempts = 0;
+    await assert.rejects(
+      startPiAgent("pane-1", "agent-1", [], {
+        async run() {
+          nonBusyAttempts += 1;
+          throw misleadingError;
+        },
+        async sleep() {
+          assert.fail("non-busy failures must not retry");
+        },
+      }),
+      (error) => error === misleadingError,
+    );
+    assert.equal(nonBusyAttempts, 1);
+
+    const finalBusyError = herdrError("agent_pane_busy", "still busy");
+    let exhaustedAttempts = 0;
+    let exhaustedSleeps = 0;
+    await assert.rejects(
+      startPiAgent("pane-1", "agent-1", [], {
+        async run() {
+          exhaustedAttempts += 1;
+          throw finalBusyError;
+        },
+        async sleep() {
+          exhaustedSleeps += 1;
+        },
+        maxAttempts: 3,
+      }),
+      (error) => error === finalBusyError,
+    );
+    assert.equal(exhaustedAttempts, 3);
+    assert.equal(exhaustedSleeps, 2);
+
+    await assert.rejects(
+      startPiAgent("pane-1", "agent-1", [], {
+        async run() { return ""; },
+        async sleep() { return undefined; },
+        maxAttempts: 0,
+      }),
+      /maxAttempts must be a positive integer/,
+    );
   });
 
   test("recovers a pane ID from valid Herdr split output", async () => {

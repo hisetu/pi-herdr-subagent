@@ -500,8 +500,43 @@ async function paneRename(paneId: string, title: string): Promise<void> {
   await runHerdr(["pane", "rename", paneId, title]);
 }
 
-async function startPiAgent(paneId: string, agentName: string, piArgs: string[]): Promise<void> {
-  await runHerdr([
+function herdrErrorCode(error: unknown): string | undefined {
+  const values: unknown[] = [];
+  if (typeof error === "object" && error !== null) {
+    values.push((error as { stdout?: unknown }).stdout, (error as { stderr?: unknown }).stderr);
+  }
+  if (error instanceof Error) values.push(error.message);
+
+  for (const value of values) {
+    const text = Buffer.isBuffer(value) ? value.toString("utf8") : typeof value === "string" ? value : "";
+    for (const line of text.split(/\r?\n/).reverse()) {
+      const candidate = line.trim();
+      if (!candidate.startsWith("{")) continue;
+      try {
+        const payload = JSON.parse(candidate) as { error?: { code?: string } };
+        if (payload.error?.code) return payload.error.code;
+      } catch {
+        // Ignore command text and non-JSON diagnostics.
+      }
+    }
+  }
+  return undefined;
+}
+
+async function startPiAgent(
+  paneId: string,
+  agentName: string,
+  piArgs: string[],
+  operations: {
+    run: (args: string[]) => Promise<string>;
+    sleep: (ms: number) => Promise<void>;
+    maxAttempts?: number;
+  } = {
+    run: runHerdr,
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  },
+): Promise<void> {
+  const args = [
     "agent",
     "start",
     agentName,
@@ -513,7 +548,21 @@ async function startPiAgent(paneId: string, agentName: string, piArgs: string[])
     "60000",
     "--",
     ...piArgs,
-  ]);
+  ];
+  const maxAttempts = operations.maxAttempts ?? 40;
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error("startPiAgent maxAttempts must be a positive integer.");
+  }
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await operations.run(args);
+      return;
+    } catch (error) {
+      const paneBusy = herdrErrorCode(error) === "agent_pane_busy";
+      if (!paneBusy || attempt === maxAttempts) throw error;
+      await operations.sleep(100);
+    }
+  }
 }
 
 async function agentPrompt(agentName: string, prompt: string): Promise<void> {
@@ -1023,6 +1072,8 @@ export const __test = {
   waitForAgents,
   formatCollectSource,
   formatStatusLine,
+  herdrErrorCode,
+  startPiAgent,
 };
 
 export default function herdrSubagentsExtension(pi: ExtensionAPI) {
