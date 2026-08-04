@@ -565,8 +565,29 @@ async function startPiAgent(
   }
 }
 
-async function agentPrompt(agentName: string, prompt: string): Promise<void> {
-  await runHerdr(["agent", "prompt", agentName, prompt]);
+async function agentPrompt(
+  agentName: string,
+  prompt: string,
+  execute: (args: string[]) => Promise<string> = runHerdr,
+): Promise<void> {
+  try {
+    await execute([
+      "agent",
+      "prompt",
+      agentName,
+      prompt,
+      "--wait",
+      "--until",
+      "working",
+      "--timeout",
+      "10000",
+    ]);
+  } catch (error) {
+    if (herdrErrorCode(error) !== "agent_prompt_stalled") throw error;
+
+    await execute(["agent", "send-keys", agentName, "enter"]);
+    await execute(["agent", "wait", agentName, "--until", "working", "--timeout", "10000"]);
+  }
 }
 
 async function paneRead(paneId: string, lines: number): Promise<string> {
@@ -1074,6 +1095,7 @@ export const __test = {
   formatStatusLine,
   herdrErrorCode,
   startPiAgent,
+  agentPrompt,
 };
 
 export default function herdrSubagentsExtension(pi: ExtensionAPI) {

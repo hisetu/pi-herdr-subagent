@@ -35,6 +35,7 @@ const {
   formatStatusLine,
   herdrErrorCode,
   startPiAgent,
+  agentPrompt,
 } = __test;
 
 describe("task normalization and role prompts", () => {
@@ -169,6 +170,44 @@ describe("payload, quoting, title, and CLI argument helpers", () => {
         maxAttempts: 0,
       }),
       /maxAttempts must be a positive integer/,
+    );
+  });
+
+  test("submits prompts atomically and recovers a stalled editor with Enter", async () => {
+    const directCalls: string[][] = [];
+    await agentPrompt("review-1", "inspect changes", async (args) => {
+      directCalls.push(args);
+      return "";
+    });
+    assert.deepEqual(directCalls, [[
+      "agent", "prompt", "review-1", "inspect changes",
+      "--wait", "--until", "working", "--timeout", "10000",
+    ]]);
+
+    const stalledError = Object.assign(new Error("prompt stalled"), {
+      stdout: JSON.stringify({ error: { code: "agent_prompt_stalled" } }),
+    });
+    const recoveryCalls: string[][] = [];
+    await agentPrompt("review-2", "inspect routing", async (args) => {
+      recoveryCalls.push(args);
+      if (recoveryCalls.length === 1) throw stalledError;
+      return "";
+    });
+    assert.deepEqual(recoveryCalls, [
+      [
+        "agent", "prompt", "review-2", "inspect routing",
+        "--wait", "--until", "working", "--timeout", "10000",
+      ],
+      ["agent", "send-keys", "review-2", "enter"],
+      ["agent", "wait", "review-2", "--until", "working", "--timeout", "10000"],
+    ]);
+
+    const unrelatedError = Object.assign(new Error("agent missing"), {
+      stdout: JSON.stringify({ error: { code: "agent_not_found" } }),
+    });
+    await assert.rejects(
+      agentPrompt("missing", "prompt", async () => { throw unrelatedError; }),
+      (error) => error === unrelatedError,
     );
   });
 
