@@ -170,7 +170,7 @@ Example:
 
 ### `herdr_subagents_collect`
 
-Collect results from tracked subagent panes.
+Collect results from tracked subagent panes. After collection, `idle` / `done` panes are closed and untracked by default; active, blocked, or unknown panes remain open.
 
 The output includes:
 
@@ -183,6 +183,7 @@ Parameters:
 - `lines?: number` — fallback pane-read line count
 - `timeoutMs?: number`
 - `latestOnly?: boolean` — collect only the newest spawned batch
+- `closePanes?: boolean` — close collected completed panes; defaults to `true`
 
 Example:
 
@@ -293,7 +294,7 @@ Expected output shape:
 4. Collect results with `herdr_subagents_collect`
 5. Use the built-in lightweight synthesis as a quick supervisor summary
 6. Interrupt a stuck pane with `herdr_subagents_interrupt` if needed
-7. Clear finished tracked panes with `herdr_subagents_clear` when appropriate
+7. Completed panes close automatically after collect; use `herdr_subagents_clear` only for leftovers
 8. Synthesize the final answer in the supervisor pane if more refinement is needed
 
 ## Example workflow

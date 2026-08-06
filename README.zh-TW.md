@@ -154,7 +154,7 @@ pi install https://github.com/hisetu/pi-herdr-subagent
 
 ### `herdr_subagents_collect`
 
-收集 tracked subagent panes 的結果。
+收集 tracked subagent panes 的結果。收集後預設會關閉並取消追蹤 `idle` / `done` panes；仍在執行、blocked 或狀態未知的 panes 會保持開啟。
 
 輸出包含：
 
@@ -167,6 +167,7 @@ pi install https://github.com/hisetu/pi-herdr-subagent
 - `lines?: number` — fallback pane-read line count
 - `timeoutMs?: number`
 - `latestOnly?: boolean` — 只收集最新一批
+- `closePanes?: boolean` — 關閉已完成且已收集的 panes，預設為 `true`
 
 ### `herdr_subagents_interrupt`
 
@@ -242,7 +243,7 @@ pi install https://github.com/hisetu/pi-herdr-subagent
 4. 用 `herdr_subagents_collect` 收集結果
 5. 用內建 lightweight synthesis 快速看 supervisor summary
 6. 如果有 pane 卡住，可用 `herdr_subagents_interrupt`
-7. 完成後可用 `herdr_subagents_clear` 清理 tracked panes
+7. 已完成的 panes 會在 collect 後自動關閉；`herdr_subagents_clear` 只需處理剩餘 panes
 8. 如有需要，在 supervisor pane 綜合出最終答案
 
 ## 備註

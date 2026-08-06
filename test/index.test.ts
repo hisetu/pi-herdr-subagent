@@ -24,6 +24,7 @@ const {
   renderMessageLine,
   keepRecentMessages,
   filterAgentsByBatch,
+  partitionCollectCleanupCandidates,
   cleanupCreatedPanes,
   spawnSubagentsTransactional,
   parseSplitPaneId,
@@ -771,6 +772,30 @@ describe("completion polling lifecycle", () => {
 });
 
 describe("missing pane and result-source reporting", () => {
+  test("auto-close selects only completed panes and clears missing records", () => {
+    const makeAgent = (paneId: string) => ({
+      paneId,
+      role: "review" as const,
+      task: paneId,
+      cwd: "/repo",
+      createdAt: 1,
+      batchId: "batch-1",
+      supervisorPaneId: "supervisor",
+    });
+    const targets = ["done", "idle", "working", "blocked", "unknown", "missing"].map(makeAgent);
+    const panes = new Map([
+      ["done", { pane_id: "done", agent_status: "done" }],
+      ["idle", { pane_id: "idle", agent_status: "idle" }],
+      ["working", { pane_id: "working", agent_status: "working" }],
+      ["blocked", { pane_id: "blocked", agent_status: "blocked" }],
+      ["unknown", { pane_id: "unknown", agent_status: "unknown" }],
+    ]);
+
+    const result = partitionCollectCleanupCandidates(targets, panes);
+    assert.deepEqual(result.closeCandidates.map((agent) => agent.paneId), ["done", "idle"]);
+    assert.deepEqual(result.missingCandidates.map((agent) => agent.paneId), ["missing"]);
+  });
+
   test("does not treat a missing pane as a settled completion", async () => {
     await assert.rejects(
       waitForAgents(["missing-pane"], 1000, {

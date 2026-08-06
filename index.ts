@@ -200,6 +200,7 @@ const collectParams = Type.Object({
   lines: Type.Optional(Type.Number({ minimum: 5, maximum: 200, description: "How many recent lines to read per pane" })),
   timeoutMs: Type.Optional(Type.Number({ minimum: 1000, maximum: 1800000, description: "Wait timeout in milliseconds" })),
   latestOnly: Type.Optional(Type.Boolean({ description: "Collect only the most recent spawned batch" })),
+  closePanes: Type.Optional(Type.Boolean({ description: "Close collected idle/done panes and clear their tracking; defaults to true" })),
 });
 
 const clearParams = Type.Object({
@@ -967,6 +968,25 @@ function filterAgentsByBatch(list: SubagentPane[], latestOnly?: boolean): Subage
   return latestBatchId ? list.filter((agent) => agent.batchId === latestBatchId) : list;
 }
 
+function partitionCollectCleanupCandidates(
+  targetAgents: SubagentPane[],
+  byId: Map<string, PaneInfo>,
+): { closeCandidates: SubagentPane[]; missingCandidates: SubagentPane[] } {
+  const closeCandidates: SubagentPane[] = [];
+  const missingCandidates: SubagentPane[] = [];
+
+  for (const agent of targetAgents) {
+    const pane = byId.get(agent.paneId);
+    if (!pane) {
+      missingCandidates.push(agent);
+    } else if (pane.agent_status === "idle" || pane.agent_status === "done") {
+      closeCandidates.push(agent);
+    }
+  }
+
+  return { closeCandidates, missingCandidates };
+}
+
 async function extractAssistantTextFromSession(sessionPath: string): Promise<string | undefined> {
   try {
     const raw = await fs.readFile(sessionPath, "utf8");
@@ -1084,6 +1104,7 @@ export const __test = {
   renderMessageLine,
   keepRecentMessages,
   filterAgentsByBatch,
+  partitionCollectCleanupCandidates,
   cleanupCreatedPanes,
   spawnSubagentsTransactional,
   parseSplitPaneId,
@@ -1183,7 +1204,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       "Prefer herdr_subagents_spawn for multi-module investigation, debugging separate hypotheses, comparing alternatives, independent review, and isolated non-overlapping implementation tasks.",
       "Do not use herdr_subagents_spawn for tiny sequential tasks, tightly coupled work, or workers that would edit the same files.",
       "Use herdr_subagents_status to inspect spawned pane status before reporting progress.",
-      "Use herdr_subagents_collect to gather results after spawned panes finish.",
+      "Use herdr_subagents_collect after workers finish; it closes and untracks completed panes by default.",
     ],
     parameters: spawnParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1360,7 +1381,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "herdr_subagents_collect",
     label: "Herdr Collect",
-    description: "Collect recent output from tracked herdr-based subagent panes.",
+    description: "Collect results, then close and untrack completed subagent panes by default; set closePanes to false to keep them open.",
     parameters: collectParams,
     async execute(_toolCallId, params) {
       requireHerdr();
@@ -1368,7 +1389,14 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       if (targetAgents.length === 0) {
         return {
           content: [{ type: "text", text: "No tracked herdr subagents to collect from." }],
-          details: { agents: [], synthesis: undefined },
+          details: {
+            agents: [] as Array<Record<string, unknown>>,
+            synthesis: undefined as string | undefined,
+            closed: [] as SubagentPane[],
+            missingCleared: [] as SubagentPane[],
+            failedToClose: [] as SubagentPane[],
+            remaining: agents,
+          },
         };
       }
 
@@ -1403,11 +1431,48 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       }
 
       const synthesis = buildCollectSynthesis(synthesisItems);
-      const finalText = synthesis ? `${synthesis}\n\n${textBlocks.join("\n\n")}` : textBlocks.join("\n\n");
+      let finalText = synthesis ? `${synthesis}\n\n${textBlocks.join("\n\n")}` : textBlocks.join("\n\n");
+
+      const closed: SubagentPane[] = [];
+      const failedToClose: SubagentPane[] = [];
+      const missingCleared: SubagentPane[] = [];
+      if (params.closePanes ?? true) {
+        const candidates = partitionCollectCleanupCandidates(targetAgents, byId);
+        missingCleared.push(...candidates.missingCandidates);
+        const retained = await cleanupCreatedPanes(candidates.closeCandidates, {
+          close: paneClose,
+          async listPaneIds() {
+            return new Set((await listPanes()).map((pane) => pane.pane_id));
+          },
+        });
+        const retainedIds = new Set(retained.map((agent) => agent.paneId));
+        closed.push(...candidates.closeCandidates.filter((agent) => !retainedIds.has(agent.paneId)));
+        failedToClose.push(...retained);
+
+        const clearedIds = new Set([...closed, ...missingCleared].map((agent) => agent.paneId));
+        agents = agents.filter((agent) => !clearedIds.has(agent.paneId));
+        persistState(pi, agents, messages);
+
+        const activeCount = targetAgents.length - candidates.closeCandidates.length - missingCleared.length;
+        const cleanupParts = [
+          closed.length > 0 ? `closed ${closed.length} completed pane(s)` : undefined,
+          missingCleared.length > 0 ? `cleared ${missingCleared.length} missing pane record(s)` : undefined,
+          activeCount > 0 ? `left ${activeCount} active pane(s) open` : undefined,
+          failedToClose.length > 0 ? `${failedToClose.length} pane(s) failed to close and remain tracked` : undefined,
+        ].filter((part): part is string => Boolean(part));
+        if (cleanupParts.length > 0) finalText += `\n\nCleanup: ${cleanupParts.join("; ")}.`;
+      }
 
       return {
         content: [{ type: "text", text: finalText }],
-        details: { agents: summaries, synthesis },
+        details: {
+          agents: summaries,
+          synthesis,
+          closed,
+          missingCleared,
+          failedToClose,
+          remaining: agents,
+        },
       };
     },
   });

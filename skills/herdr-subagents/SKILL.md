@@ -93,10 +93,10 @@ expected result shape:
 2. spawn panes with `herdr_subagents_spawn`
 3. inspect progress with `herdr_subagents_status`
 4. use `herdr_subagents_global_status` if you need a rough workspace-wide view beyond the current session
-5. collect outputs with `herdr_subagents_collect`
+5. collect outputs with `herdr_subagents_collect`; completed panes close automatically by default
 6. use the built-in lightweight synthesis to quickly scan combined findings and unknowns
 7. interrupt a stuck pane with `herdr_subagents_interrupt` if needed
-8. clear finished tracked panes with `herdr_subagents_clear` when you no longer need them
+8. use `herdr_subagents_clear` only for leftover, interrupted, or intentionally retained panes
 9. synthesize the final answer in the supervisor pane when more refinement is needed
 
 ## examples
@@ -130,5 +130,6 @@ do not use this when:
 - use per-task roles when one batch mixes investigation and implementation
 - use `herdr_subagents_interrupt` if one worker looks stuck
 - when a worker finishes, expect a lightweight completion notify in the supervisor pane
-- use `herdr_subagents_clear` to close worker panes and remove stale tracking; closing is the default
-- use `closePanes: false` only when you want to clear tracking while leaving worker panes open
+- `herdr_subagents_collect` closes and untracks collected `idle` / `done` panes by default; active or blocked panes stay open
+- pass `closePanes: false` to collect when you want completed worker panes to remain open
+- use `herdr_subagents_clear` to close leftover panes and remove stale tracking; closing is the default
