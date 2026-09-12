@@ -4,7 +4,7 @@
 
 Visible herdr-based subagents for pi.
 
-This package lets a supervisor agent spawn a few **real pi subagents in separate herdr panes** so the user can watch progress directly instead of relying on hidden background workers.
+This package lets a supervisor agent spawn a few **real jcode subagents in separate herdr panes** so the user can watch progress directly instead of relying on hidden background workers. If jcode startup fails, it falls back to pi for that worker.
 
 ## What it does
 
@@ -35,7 +35,8 @@ The bundled prompt guidance proactively uses this workflow for non-trivial tasks
 ## Features
 
 - Spawn 1-4 visible subagents in sibling herdr panes
-- Start each worker through `herdr agent start` with a unique name such as `research-1-a1b2c3`
+- Validate requested model IDs against Pi's currently available model catalog before creating any panes
+- Start each worker through `herdr agent start` with a unique name such as `research-1-a1b2c3`; jcode is attempted first, with pi as the startup fallback
 - Track subagent status by pane and agent name
 - Collect structured results from subagent sessions
 - Add a lightweight supervisor synthesis on top of per-pane results
@@ -52,6 +53,7 @@ The bundled prompt guidance proactively uses this workflow for non-trivial tasks
 
 - [pi](https://github.com/earendil-works/pi)
 - [herdr](https://github.com/ogulcancelik/herdr)
+- A herdr agent-kind plugin that supports `jcode` when you want the preferred jcode subagents path; without it, workers fall back to `pi`
 - The current pi session must be running **inside a herdr pane**
 
 Session records are stored under `$PI_CODING_AGENT_DIR/extensions/herdr-subagents/sessions` when `PI_CODING_AGENT_DIR` is set, otherwise under the portable `~/.pi/agent` fallback.
@@ -78,7 +80,7 @@ Parameters:
 
 - `tasks: Array<string | { task: string; role?: "research" | "implement" | "review"; model?: string }>` — 1 to 4 task prompts
 - `role?: "research" | "implement" | "review"` — default role fallback when a task does not specify its own role
-- `model?: string` — optional default pi model override
+- `model?: string` — optional default Pi model override in `provider/model` format; spawn fails before opening panes when unavailable
 - `thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh"`
 - `cwd?: string` — working directory for spawned panes
 

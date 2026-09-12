@@ -6,6 +6,7 @@ import { __test } from "../index.ts";
 
 const {
   normalizeSpawnTasks,
+  validateRequestedModels,
   buildPrompt,
   encodeNotifyPayload,
   decodeNotifyPayload,
@@ -36,6 +37,7 @@ const {
   formatStatusLine,
   herdrErrorCode,
   startPiAgent,
+  startPreferredSubagentAgent,
   agentPrompt,
 } = __test;
 
@@ -56,6 +58,35 @@ describe("task normalization and role prompts", () => {
         { task: "apply fix", role: "implement", model: "default-model" },
         { task: "review fix", role: "research", model: "task-model" },
       ],
+    );
+  });
+
+  test("validates requested models against the available model catalog", () => {
+    const tasks = normalizeSpawnTasks([
+      { task: "review", model: "github-copilot/claude-opus-4.6" },
+      { task: "test", model: "github-copilot/gpt-5.6-sol" },
+      "use default",
+    ], "review");
+    assert.deepEqual(
+      validateRequestedModels(tasks, [
+        "github-copilot/gpt-5.6-sol",
+        "github-copilot/claude-opus-4.6",
+        "github-copilot/gpt-5.6-sol",
+      ]),
+      {
+        requested: ["github-copilot/claude-opus-4.6", "github-copilot/gpt-5.6-sol"],
+        available: ["github-copilot/claude-opus-4.6", "github-copilot/gpt-5.6-sol"],
+      },
+    );
+
+    assert.throws(
+      () => validateRequestedModels(tasks, ["github-copilot/claude-opus-4.6"]),
+      (error) => {
+        assert.match(String(error), /Unavailable subagent model\(s\): github-copilot\/gpt-5\.6-sol/);
+        assert.match(String(error), /Available models \(1\):/);
+        assert.match(String(error), /github-copilot\/claude-opus-4\.6/);
+        return true;
+      },
     );
   });
 
@@ -172,6 +203,44 @@ describe("payload, quoting, title, and CLI argument helpers", () => {
       }),
       /maxAttempts must be a positive integer/,
     );
+  });
+
+  test("prefers jcode startup and falls back to pi when jcode fails", async () => {
+    const herdrError = (code: string, message = code) => Object.assign(new Error(message), {
+      stdout: JSON.stringify({ error: { code, message }, id: "cli:agent:start" }),
+    });
+
+    const directCalls: string[][] = [];
+    const preferred = await startPreferredSubagentAgent("pane-1", "agent-1", ["--no-update", "-C", "/repo"], ["--session", "session.jsonl"], {
+      async run(args) {
+        directCalls.push(args);
+        return "";
+      },
+      async sleep() {
+        assert.fail("successful jcode startup should not sleep");
+      },
+    });
+    assert.equal(preferred.kind, "jcode");
+    assert.equal(preferred.fallbackReason, undefined);
+    assert.equal(directCalls.length, 1);
+    assert.deepEqual(directCalls[0]?.slice(0, 6), ["agent", "start", "agent-1", "--kind", "jcode", "--pane"]);
+
+    const fallbackCalls: string[][] = [];
+    const fallback = await startPreferredSubagentAgent("pane-1", "agent-1", ["--no-update", "-C", "/repo"], ["--session", "session.jsonl"], {
+      async run(args) {
+        fallbackCalls.push(args);
+        if (fallbackCalls.length === 1) throw herdrError("unsupported_agent_kind", "jcode unsupported");
+        return "";
+      },
+      async sleep() {
+        assert.fail("non-busy jcode failure should fallback without retry sleeps");
+      },
+    });
+    assert.equal(fallback.kind, "pi");
+    assert.match(fallback.fallbackReason ?? "", /jcode unsupported/);
+    assert.equal(fallbackCalls.length, 2);
+    assert.deepEqual(fallbackCalls[0]?.slice(0, 6), ["agent", "start", "agent-1", "--kind", "jcode", "--pane"]);
+    assert.deepEqual(fallbackCalls[1]?.slice(0, 6), ["agent", "start", "agent-1", "--kind", "pi", "--pane"]);
   });
 
   test("submits prompts atomically and recovers a stalled editor with Enter", async () => {

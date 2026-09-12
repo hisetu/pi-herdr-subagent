@@ -39,6 +39,8 @@ type SubagentPane = {
   model?: string;
   thinking?: Thinking;
   command?: string;
+  agentKind?: SubagentAgentKind;
+  jcodeFallbackReason?: string;
 };
 
 type NormalizedSpawnTask = {
@@ -257,6 +259,26 @@ function normalizeSpawnTasks(tasks: Array<string | SpawnTask>, defaultRole: Role
   });
 }
 
+function validateRequestedModels(
+  tasks: NormalizedSpawnTask[],
+  availableModelIds: string[],
+): { requested: string[]; available: string[] } {
+  const available = [...new Set(availableModelIds)].sort();
+  const availableSet = new Set(available);
+  const requested = [...new Set(tasks.flatMap((task) => task.model ? [task.model] : []))];
+  const unavailable = requested.filter((model) => !availableSet.has(model));
+
+  if (unavailable.length > 0) {
+    throw new Error([
+      `Unavailable subagent model(s): ${unavailable.join(", ")}.`,
+      `Available models (${available.length}):`,
+      ...available.map((model) => `- ${model}`),
+    ].join("\n"));
+  }
+
+  return { requested, available };
+}
+
 function buildPrompt(role: Role, task: string): string {
   const shared = [
     "You are a subagent working under a supervisor in herdr.",
@@ -340,10 +362,19 @@ type SplitTarget = {
 
 class UnknownSplitOutcomeError extends Error {}
 
+type SubagentAgentKind = "jcode" | "pi";
+
 type SpawnedSubagentPane = SubagentPane & {
   sessionPath: string;
   agentName: string;
   command: string;
+};
+
+type StartedSubagentAgent = {
+  kind: SubagentAgentKind;
+  args: string[];
+  command: string;
+  fallbackReason?: string;
 };
 
 type SpawnTransactionOperations = {
@@ -524,35 +555,53 @@ function herdrErrorCode(error: unknown): string | undefined {
   return undefined;
 }
 
-async function startPiAgent(
+type AgentStartOperations = {
+  run: (args: string[]) => Promise<string>;
+  sleep: (ms: number) => Promise<void>;
+  maxAttempts?: number;
+};
+
+const defaultAgentStartOperations: AgentStartOperations = {
+  run: runHerdr,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+function buildJcodeArgs(cwd: string): string[] {
+  return ["--no-update", "-C", cwd];
+}
+
+function buildAgentStartArgs(
   paneId: string,
   agentName: string,
-  piArgs: string[],
-  operations: {
-    run: (args: string[]) => Promise<string>;
-    sleep: (ms: number) => Promise<void>;
-    maxAttempts?: number;
-  } = {
-    run: runHerdr,
-    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  },
-): Promise<void> {
-  const args = [
+  kind: SubagentAgentKind,
+  agentArgs: string[],
+): string[] {
+  return [
     "agent",
     "start",
     agentName,
     "--kind",
-    "pi",
+    kind,
     "--pane",
     paneId,
     "--timeout",
     "60000",
     "--",
-    ...piArgs,
+    ...agentArgs,
   ];
+}
+
+async function startAgentKind(
+  paneId: string,
+  agentName: string,
+  kind: SubagentAgentKind,
+  agentArgs: string[],
+  operations: AgentStartOperations = defaultAgentStartOperations,
+): Promise<void> {
+  const args = buildAgentStartArgs(paneId, agentName, kind, agentArgs);
   const maxAttempts = operations.maxAttempts ?? 40;
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
-    throw new Error("startPiAgent maxAttempts must be a positive integer.");
+    throw new Error("startAgentKind maxAttempts must be a positive integer.");
   }
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
@@ -564,6 +613,59 @@ async function startPiAgent(
       await operations.sleep(100);
     }
   }
+}
+
+async function startPiAgent(
+  paneId: string,
+  agentName: string,
+  piArgs: string[],
+  operations: AgentStartOperations = defaultAgentStartOperations,
+): Promise<void> {
+  try {
+    await startAgentKind(paneId, agentName, "pi", piArgs, operations);
+  } catch (error) {
+    if (error instanceof Error && error.message === "startAgentKind maxAttempts must be a positive integer.") {
+      throw new Error("startPiAgent maxAttempts must be a positive integer.");
+    }
+    throw error;
+  }
+}
+
+async function startPreferredSubagentAgent(
+  paneId: string,
+  agentName: string,
+  jcodeArgs: string[],
+  piArgs: string[],
+  operations: AgentStartOperations = defaultAgentStartOperations,
+): Promise<StartedSubagentAgent> {
+  const attempts: Array<{ kind: SubagentAgentKind; args: string[] }> = [
+    { kind: "jcode", args: jcodeArgs },
+    { kind: "pi", args: piArgs },
+  ];
+  let jcodeError: unknown;
+
+  for (const attempt of attempts) {
+    try {
+      await startAgentKind(paneId, agentName, attempt.kind, attempt.args, operations);
+      return {
+        kind: attempt.kind,
+        args: attempt.args,
+        command: [attempt.kind, ...attempt.args].map(shellQuote).join(" "),
+        fallbackReason: attempt.kind === "pi" && jcodeError ? errorMessage(jcodeError) : undefined,
+      };
+    } catch (error) {
+      if (attempt.kind === "jcode") {
+        jcodeError = error;
+        continue;
+      }
+      throw new Error(
+        `Failed to start preferred jcode subagent (${errorMessage(jcodeError)}); fallback pi also failed (${errorMessage(error)}).`,
+        { cause: error },
+      );
+    }
+  }
+
+  throw new Error("Failed to start subagent.");
 }
 
 async function agentPrompt(
@@ -1086,6 +1188,8 @@ async function readCollectedOutput(
 // Pure helpers exported only to characterize the extension's existing behavior.
 export const __test = {
   normalizeSpawnTasks,
+  validateRequestedModels,
+  buildJcodeArgs,
   buildPrompt,
   encodeNotifyPayload,
   decodeNotifyPayload,
@@ -1116,6 +1220,7 @@ export const __test = {
   formatStatusLine,
   herdrErrorCode,
   startPiAgent,
+  startPreferredSubagentAgent,
   agentPrompt,
 };
 
@@ -1217,6 +1322,8 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       const sourcePane = process.env.HERDR_PANE_ID as string;
       const batchId = makeBatchId();
       const normalizedTasks = normalizeSpawnTasks(params.tasks as Array<string | SpawnTask>, defaultRole, params.model);
+      const availableModelIds = ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`);
+      const modelCatalog = validateRequestedModels(normalizedTasks, availableModelIds);
 
       await fs.mkdir(SESSION_DIR, { recursive: true });
 
@@ -1226,8 +1333,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           const sessionPath = makeSessionPath();
           await fs.mkdir(dirname(sessionPath), { recursive: true });
           const agentName = makeAgentName(item.role, index, batchId);
-          const piArgs = buildPiArgs(sessionPath, item.model, params.thinking);
-          const command = ["pi", ...piArgs].map(shellQuote).join(" ");
+          const command = ["jcode", ...buildJcodeArgs(cwd)].map(shellQuote).join(" ");
           return {
             role: item.role,
             task: item.task,
@@ -1243,11 +1349,17 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           };
         },
         rename: (agent) => paneRename(agent.paneId, makePaneTitle(agent.role, agent.task)),
-        start: (agent) => startPiAgent(
-          agent.paneId,
-          agent.agentName,
-          buildPiArgs(agent.sessionPath, agent.model, agent.thinking),
-        ),
+        start: async (agent) => {
+          const started = await startPreferredSubagentAgent(
+            agent.paneId,
+            agent.agentName,
+            buildJcodeArgs(agent.cwd),
+            buildPiArgs(agent.sessionPath, agent.model, agent.thinking),
+          );
+          agent.command = started.command;
+          agent.agentKind = started.kind;
+          agent.jcodeFallbackReason = started.fallbackReason;
+        },
         prompt: (agent) => agentPrompt(agent.agentName, buildPrompt(agent.role, agent.task)),
         close: paneClose,
         async listPaneIds() {
@@ -1262,17 +1374,27 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       completionPoll.markActive(created);
 
       const text = [
+        `Checked ${modelCatalog.available.length} available model(s).`,
+        modelCatalog.requested.length > 0
+          ? `Validated Pi fallback model(s): ${modelCatalog.requested.join(", ")}. Jcode is still tried first.`
+          : "No model override requested; jcode is tried first, then Pi's default model is used only if jcode startup fails.",
         `Spawned ${created.length} herdr subagent pane(s).`,
         ...created.flatMap((agent) => [
           formatStatusLine(agent),
           agent.agentName ? `  agent: ${agent.agentName}` : undefined,
+          agent.agentKind ? `  agent kind: ${agent.agentKind}` : undefined,
           agent.command ? `  command: ${agent.command}` : undefined,
+          agent.jcodeFallbackReason ? `  jcode startup failed; fallback reason: ${agent.jcodeFallbackReason}` : undefined,
         ].filter((line): line is string => Boolean(line))),
       ].join("\n");
 
       return {
         content: [{ type: "text", text }],
-        details: { agents: created },
+        details: {
+          agents: created,
+          requestedModels: modelCatalog.requested,
+          availableModels: modelCatalog.available,
+        },
       };
     },
   });
