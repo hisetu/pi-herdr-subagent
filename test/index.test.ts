@@ -14,6 +14,7 @@ const {
   sanitizePaneTitle,
   makePaneTitle,
   buildPiArgs,
+  buildJcodeArgs,
   extractStructuredSections,
   extractStructuredSummary,
   extractTaskLine,
@@ -127,10 +128,14 @@ describe("payload, quoting, title, and CLI argument helpers", () => {
     assert.equal(makePaneTitle("implement", "x".repeat(50)), `implement: ${"x".repeat(41)}…`);
   });
 
-  test("builds positional-safe Pi argument arrays and omits absent options", () => {
+  test("builds positional-safe agent argument arrays and omits absent options", () => {
     assert.deepEqual(buildPiArgs("/tmp/session with spaces.jsonl"), ["--session", "/tmp/session with spaces.jsonl"]);
     assert.deepEqual(buildPiArgs("session.jsonl", "provider/model", "high"), [
       "--session", "session.jsonl", "--model", "provider/model", "--thinking", "high",
+    ]);
+    assert.deepEqual(buildJcodeArgs("/repo path"), ["--no-update", "-C", "/repo path"]);
+    assert.deepEqual(buildJcodeArgs("/repo", "github-copilot/gpt-5.5"), [
+      "--no-update", "-C", "/repo", "--provider", "copilot", "--model", "gpt-5.5",
     ]);
   });
 
@@ -219,17 +224,21 @@ describe("payload, quoting, title, and CLI argument helpers", () => {
       async sleep() {
         assert.fail("successful jcode startup should not sleep");
       },
+      async listPanes() {
+        return [{ pane_id: "pane-1", agent: "jcode" }];
+      },
     });
     assert.equal(preferred.kind, "jcode");
+    assert.equal(preferred.promptMode, "raw-pane");
     assert.equal(preferred.fallbackReason, undefined);
     assert.equal(directCalls.length, 1);
-    assert.deepEqual(directCalls[0]?.slice(0, 6), ["agent", "start", "agent-1", "--kind", "jcode", "--pane"]);
+    assert.deepEqual(directCalls[0], ["pane", "run", "pane-1", "jcode", "--no-update", "-C", "/repo"]);
 
     const fallbackCalls: string[][] = [];
     const fallback = await startPreferredSubagentAgent("pane-1", "agent-1", ["--no-update", "-C", "/repo"], ["--session", "session.jsonl"], {
       async run(args) {
         fallbackCalls.push(args);
-        if (fallbackCalls.length === 1) throw herdrError("unsupported_agent_kind", "jcode unsupported");
+        if (fallbackCalls.length === 1) throw herdrError("pane_run_failed", "jcode unsupported");
         return "";
       },
       async sleep() {
@@ -237,9 +246,10 @@ describe("payload, quoting, title, and CLI argument helpers", () => {
       },
     });
     assert.equal(fallback.kind, "pi");
+    assert.equal(fallback.promptMode, "herdr-agent");
     assert.match(fallback.fallbackReason ?? "", /jcode unsupported/);
     assert.equal(fallbackCalls.length, 2);
-    assert.deepEqual(fallbackCalls[0]?.slice(0, 6), ["agent", "start", "agent-1", "--kind", "jcode", "--pane"]);
+    assert.deepEqual(fallbackCalls[0], ["pane", "run", "pane-1", "jcode", "--no-update", "-C", "/repo"]);
     assert.deepEqual(fallbackCalls[1]?.slice(0, 6), ["agent", "start", "agent-1", "--kind", "pi", "--pane"]);
   });
 

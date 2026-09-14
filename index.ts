@@ -40,6 +40,7 @@ type SubagentPane = {
   thinking?: Thinking;
   command?: string;
   agentKind?: SubagentAgentKind;
+  promptMode?: "herdr-agent" | "raw-pane";
   jcodeFallbackReason?: string;
 };
 
@@ -374,6 +375,7 @@ type StartedSubagentAgent = {
   kind: SubagentAgentKind;
   args: string[];
   command: string;
+  promptMode: "herdr-agent" | "raw-pane";
   fallbackReason?: string;
 };
 
@@ -558,16 +560,32 @@ function herdrErrorCode(error: unknown): string | undefined {
 type AgentStartOperations = {
   run: (args: string[]) => Promise<string>;
   sleep: (ms: number) => Promise<void>;
+  listPanes?: () => Promise<PaneInfo[]>;
   maxAttempts?: number;
 };
 
 const defaultAgentStartOperations: AgentStartOperations = {
   run: runHerdr,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  listPanes,
 };
 
-function buildJcodeArgs(cwd: string): string[] {
-  return ["--no-update", "-C", cwd];
+function buildJcodeArgs(cwd: string, model?: string): string[] {
+  const args = ["--no-update", "-C", cwd];
+  const modelParts = parseProviderModel(model);
+  if (modelParts?.provider === "github-copilot") args.push("--provider", "copilot");
+  if (modelParts?.model) args.push("--model", modelParts.model);
+  return args;
+}
+
+function parseProviderModel(model: string | undefined): { provider?: string; model: string } | undefined {
+  const trimmed = model?.trim();
+  if (!trimmed) return undefined;
+  const slash = trimmed.indexOf("/");
+  if (slash < 0) return { model: trimmed };
+  const provider = trimmed.slice(0, slash);
+  const modelId = trimmed.slice(slash + 1);
+  return modelId ? { provider, model: modelId } : { model: trimmed };
 }
 
 function buildAgentStartArgs(
@@ -638,34 +656,73 @@ async function startPreferredSubagentAgent(
   piArgs: string[],
   operations: AgentStartOperations = defaultAgentStartOperations,
 ): Promise<StartedSubagentAgent> {
-  const attempts: Array<{ kind: SubagentAgentKind; args: string[] }> = [
-    { kind: "jcode", args: jcodeArgs },
-    { kind: "pi", args: piArgs },
-  ];
   let jcodeError: unknown;
-
-  for (const attempt of attempts) {
-    try {
-      await startAgentKind(paneId, agentName, attempt.kind, attempt.args, operations);
-      return {
-        kind: attempt.kind,
-        args: attempt.args,
-        command: [attempt.kind, ...attempt.args].map(shellQuote).join(" "),
-        fallbackReason: attempt.kind === "pi" && jcodeError ? errorMessage(jcodeError) : undefined,
-      };
-    } catch (error) {
-      if (attempt.kind === "jcode") {
-        jcodeError = error;
-        continue;
-      }
-      throw new Error(
-        `Failed to start preferred jcode subagent (${errorMessage(jcodeError)}); fallback pi also failed (${errorMessage(error)}).`,
-        { cause: error },
-      );
-    }
+  try {
+    await startRawJcodeAgent(paneId, jcodeArgs, operations);
+    return {
+      kind: "jcode",
+      args: jcodeArgs,
+      command: ["jcode", ...jcodeArgs].map(shellQuote).join(" "),
+      promptMode: "raw-pane",
+    };
+  } catch (error) {
+    jcodeError = error;
   }
 
-  throw new Error("Failed to start subagent.");
+  try {
+    await startAgentKind(paneId, agentName, "pi", piArgs, operations);
+    return {
+      kind: "pi",
+      args: piArgs,
+      command: ["pi", ...piArgs].map(shellQuote).join(" "),
+      promptMode: "herdr-agent",
+      fallbackReason: errorMessage(jcodeError),
+    };
+  } catch (error) {
+    throw new Error(
+      `Failed to start raw jcode subagent (${errorMessage(jcodeError)}); fallback pi also failed (${errorMessage(error)}).`,
+      { cause: error },
+    );
+  }
+}
+
+async function startRawJcodeAgent(
+  paneId: string,
+  jcodeArgs: string[],
+  operations: AgentStartOperations = defaultAgentStartOperations,
+): Promise<void> {
+  const maxAttempts = operations.maxAttempts ?? 40;
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error("startRawJcodeAgent maxAttempts must be a positive integer.");
+  }
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await operations.run(["pane", "run", paneId, "jcode", ...jcodeArgs]);
+      await waitForPaneAgentKind(paneId, "jcode", 10000, operations);
+      return;
+    } catch (error) {
+      const paneBusy = herdrErrorCode(error) === "pane_not_ready" || herdrErrorCode(error) === "agent_pane_busy";
+      if (!paneBusy || attempt === maxAttempts) throw error;
+      await operations.sleep(100);
+    }
+  }
+}
+
+async function waitForPaneAgentKind(
+  paneId: string,
+  kind: SubagentAgentKind,
+  timeoutMs: number,
+  operations: Pick<AgentStartOperations, "listPanes" | "sleep"> = defaultAgentStartOperations,
+): Promise<void> {
+  const list = operations.listPanes ?? listPanes;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const pane = (await list()).find((candidate) => candidate.pane_id === paneId);
+    if (pane?.agent === kind) return;
+    await operations.sleep(250);
+  }
+  throw new Error(`Timed out waiting for pane ${paneId} to report agent kind ${kind}.`);
 }
 
 async function agentPrompt(
@@ -691,6 +748,15 @@ async function agentPrompt(
     await execute(["agent", "send-keys", agentName, "enter"]);
     await execute(["agent", "wait", agentName, "--until", "working", "--timeout", "10000"]);
   }
+}
+
+async function panePrompt(
+  paneId: string,
+  prompt: string,
+  execute: (args: string[]) => Promise<string> = runHerdr,
+): Promise<void> {
+  await execute(["pane", "send-text", paneId, prompt]);
+  await execute(["pane", "send-keys", paneId, "enter"]);
 }
 
 async function paneRead(paneId: string, lines: number): Promise<string> {
@@ -1322,6 +1388,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
       const sourcePane = process.env.HERDR_PANE_ID as string;
       const batchId = makeBatchId();
       const normalizedTasks = normalizeSpawnTasks(params.tasks as Array<string | SpawnTask>, defaultRole, params.model);
+      const defaultJcodeModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
       const availableModelIds = ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`);
       const modelCatalog = validateRequestedModels(normalizedTasks, availableModelIds);
 
@@ -1333,7 +1400,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           const sessionPath = makeSessionPath();
           await fs.mkdir(dirname(sessionPath), { recursive: true });
           const agentName = makeAgentName(item.role, index, batchId);
-          const command = ["jcode", ...buildJcodeArgs(cwd)].map(shellQuote).join(" ");
+          const command = ["jcode", ...buildJcodeArgs(cwd, item.model ?? defaultJcodeModel)].map(shellQuote).join(" ");
           return {
             role: item.role,
             task: item.task,
@@ -1353,14 +1420,17 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           const started = await startPreferredSubagentAgent(
             agent.paneId,
             agent.agentName,
-            buildJcodeArgs(agent.cwd),
+            buildJcodeArgs(agent.cwd, agent.model ?? defaultJcodeModel),
             buildPiArgs(agent.sessionPath, agent.model, agent.thinking),
           );
           agent.command = started.command;
           agent.agentKind = started.kind;
+          agent.promptMode = started.promptMode;
           agent.jcodeFallbackReason = started.fallbackReason;
         },
-        prompt: (agent) => agentPrompt(agent.agentName, buildPrompt(agent.role, agent.task)),
+        prompt: (agent) => agent.promptMode === "raw-pane"
+          ? panePrompt(agent.paneId, buildPrompt(agent.role, agent.task))
+          : agentPrompt(agent.agentName, buildPrompt(agent.role, agent.task)),
         close: paneClose,
         async listPaneIds() {
           return new Set((await listPanes()).map((pane) => pane.pane_id));
@@ -1383,6 +1453,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           formatStatusLine(agent),
           agent.agentName ? `  agent: ${agent.agentName}` : undefined,
           agent.agentKind ? `  agent kind: ${agent.agentKind}` : undefined,
+          agent.promptMode ? `  prompt mode: ${agent.promptMode}` : undefined,
           agent.command ? `  command: ${agent.command}` : undefined,
           agent.jcodeFallbackReason ? `  jcode startup failed; fallback reason: ${agent.jcodeFallbackReason}` : undefined,
         ].filter((line): line is string => Boolean(line))),

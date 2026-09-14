@@ -36,7 +36,7 @@ The bundled prompt guidance proactively uses this workflow for non-trivial tasks
 
 - Spawn 1-4 visible subagents in sibling herdr panes
 - Validate requested model IDs against Pi's currently available model catalog before creating any panes
-- Start each worker through `herdr agent start` with a unique name such as `research-1-a1b2c3`; jcode is attempted first, with pi as the startup fallback
+- Start each worker by launching raw `jcode` in the pane first; if that fails, fall back to `herdr agent start --kind pi` with a unique name such as `research-1-a1b2c3`
 - Track subagent status by pane and agent name
 - Collect structured results from subagent sessions
 - Add a lightweight supervisor synthesis on top of per-pane results
@@ -53,7 +53,7 @@ The bundled prompt guidance proactively uses this workflow for non-trivial tasks
 
 - [pi](https://github.com/earendil-works/pi)
 - [herdr](https://github.com/ogulcancelik/herdr)
-- A herdr agent-kind plugin that supports `jcode` when you want the preferred jcode subagents path; without it, workers fall back to `pi`
+- The `herdr-jcode` lifecycle hook plugin when you want raw jcode panes to report `agent: jcode`; without it, workers may fall back to `pi` if jcode readiness cannot be detected
 - The current pi session must be running **inside a herdr pane**
 
 Session records are stored under `$PI_CODING_AGENT_DIR/extensions/herdr-subagents/sessions` when `PI_CODING_AGENT_DIR` is set, otherwise under the portable `~/.pi/agent` fallback.

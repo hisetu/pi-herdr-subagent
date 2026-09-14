@@ -36,7 +36,7 @@
 
 - 在相鄰的 herdr panes 中啟動 1-4 個可見 subagents
 - 建立任何 Pane 前，先用 Pi 目前可用的模型清單驗證指定的 model ID
-- 透過 `herdr agent start` 啟動每個 worker，並設定如 `research-1-a1b2c3` 的唯一名稱；優先嘗試 jcode，啟動失敗才 fallback 到 pi
+- 每個 worker 會先在 pane 裡啟動 raw `jcode`；若失敗，才 fallback 到 `herdr agent start --kind pi`，並設定如 `research-1-a1b2c3` 的唯一名稱
 - 依 pane 與 agent name 追蹤 subagent 狀態
 - 從 subagent session 收集結構化結果
 - 在各 pane 結果之上加上一層輕量 supervisor synthesis
@@ -53,7 +53,7 @@
 
 - [pi](https://github.com/earendil-works/pi)
 - [herdr](https://github.com/ogulcancelik/herdr)
-- 若要走優先 jcode subagents 路徑，需要已安裝支援 `jcode` 的 herdr agent-kind plugin；沒有時 workers 會 fallback 到 `pi`
+- 若要讓 raw jcode panes 回報 `agent: jcode`，需要 `herdr-jcode` lifecycle hook plugin；若無法偵測 jcode readiness，workers 可能 fallback 到 `pi`
 - 目前的 pi session 必須執行在 **herdr pane 內**
 
 若有設定 `PI_CODING_AGENT_DIR`，session records 會存於 `$PI_CODING_AGENT_DIR/extensions/herdr-subagents/sessions`；否則使用可攜式 fallback `~/.pi/agent`。

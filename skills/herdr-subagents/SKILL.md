@@ -126,7 +126,7 @@ do not use this when:
 
 - the first worker opens to the supervisor's right; later workers are distributed breadth-first inside that right-side worker area without splitting the supervisor again
 - before creating panes, spawn validates every requested `provider/model` ID against Pi's currently available model catalog
-- each worker starts with jcode first; if jcode startup fails, spawn falls back to pi for that worker
+- each worker starts by launching raw jcode in the pane first; if jcode startup or readiness detection fails, spawn falls back to pi for that worker
 - each worker receives a unique Herdr agent name based on its role, batch, and position
 - use `latestOnly: true` when you only want the newest spawned batch
 - use per-task roles when one batch mixes investigation and implementation
