@@ -236,7 +236,7 @@ describe("payload, quoting, title, and CLI argument helpers", () => {
     assert.equal(preferred.promptMode, "raw-pane-run");
     assert.equal(preferred.fallbackReason, undefined);
     assert.equal(directCalls.length, 1);
-    assert.deepEqual(directCalls[0], ["pane", "run", "pane-1", "jcode", "--no-update", "-C", "/repo", "run", "prompt text"]);
+    assert.deepEqual(directCalls[0], ["pane", "run", "pane-1", "'jcode' '--no-update' '-C' '/repo' 'run' 'prompt text'"]);
 
     const fallbackCalls: string[][] = [];
     const fallback = await startPreferredSubagentAgent("pane-1", "agent-1", ["--no-update", "-C", "/repo"], ["--session", "session.jsonl"], "prompt text", {
@@ -253,7 +253,7 @@ describe("payload, quoting, title, and CLI argument helpers", () => {
     assert.equal(fallback.promptMode, "herdr-agent");
     assert.match(fallback.fallbackReason ?? "", /jcode unsupported/);
     assert.equal(fallbackCalls.length, 2);
-    assert.deepEqual(fallbackCalls[0], ["pane", "run", "pane-1", "jcode", "--no-update", "-C", "/repo", "run", "prompt text"]);
+    assert.deepEqual(fallbackCalls[0], ["pane", "run", "pane-1", "'jcode' '--no-update' '-C' '/repo' 'run' 'prompt text'"]);
     assert.deepEqual(fallbackCalls[1]?.slice(0, 6), ["agent", "start", "agent-1", "--kind", "pi", "--pane"]);
   });
 

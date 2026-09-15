@@ -716,7 +716,8 @@ async function startRawJcodeRun(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      await operations.run(["pane", "run", paneId, ...buildJcodeLaunchCommand(jcodeArgs), "run", prompt]);
+      const command = [...buildJcodeLaunchCommand(jcodeArgs), "run", prompt].map(shellQuote).join(" ");
+      await operations.run(["pane", "run", paneId, command]);
       return;
     } catch (error) {
       const paneBusy = herdrErrorCode(error) === "pane_not_ready" || herdrErrorCode(error) === "agent_pane_busy";
