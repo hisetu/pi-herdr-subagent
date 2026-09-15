@@ -41,7 +41,7 @@ type SubagentPane = {
   thinking?: Thinking;
   command?: string;
   agentKind?: SubagentAgentKind;
-  promptMode?: "herdr-agent" | "raw-pane";
+  promptMode?: "herdr-agent" | "raw-pane" | "raw-pane-run";
   jcodeFallbackReason?: string;
 };
 
@@ -376,7 +376,7 @@ type StartedSubagentAgent = {
   kind: SubagentAgentKind;
   args: string[];
   command: string;
-  promptMode: "herdr-agent" | "raw-pane";
+  promptMode: "herdr-agent" | "raw-pane" | "raw-pane-run";
   fallbackReason?: string;
   jcodeSessionPath?: string;
 };
@@ -670,17 +670,17 @@ async function startPreferredSubagentAgent(
   agentName: string,
   jcodeArgs: string[],
   piArgs: string[],
+  prompt: string,
   operations: AgentStartOperations = defaultAgentStartOperations,
 ): Promise<StartedSubagentAgent> {
   let jcodeError: unknown;
   try {
-    const jcodeSessionPath = await startRawJcodeAgent(paneId, jcodeArgs, operations);
+    await startRawJcodeRun(paneId, jcodeArgs, prompt, operations);
     return {
       kind: "jcode",
       args: jcodeArgs,
-      command: buildJcodeLaunchCommand(jcodeArgs).map(shellQuote).join(" "),
-      promptMode: "raw-pane",
-      jcodeSessionPath,
+      command: [...buildJcodeLaunchCommand(jcodeArgs), "run", prompt].map(shellQuote).join(" "),
+      promptMode: "raw-pane-run",
     };
   } catch (error) {
     jcodeError = error;
@@ -703,24 +703,21 @@ async function startPreferredSubagentAgent(
   }
 }
 
-async function startRawJcodeAgent(
+async function startRawJcodeRun(
   paneId: string,
   jcodeArgs: string[],
+  prompt: string,
   operations: AgentStartOperations = defaultAgentStartOperations,
-): Promise<string | undefined> {
-  const cwd = jcodeArgs[jcodeArgs.indexOf("-C") + 1];
-  const startedAfterMs = Date.now() - 1000;
+): Promise<void> {
   const maxAttempts = operations.maxAttempts ?? 40;
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
-    throw new Error("startRawJcodeAgent maxAttempts must be a positive integer.");
+    throw new Error("startRawJcodeRun maxAttempts must be a positive integer.");
   }
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      await operations.run(["pane", "run", paneId, ...buildJcodeLaunchCommand(jcodeArgs)]);
-      await waitForPaneAgentKind(paneId, "jcode", 10000, operations);
-      await waitForPaneText(paneId, "1>", 30000, operations);
-      return cwd ? await findLatestJcodeSessionPath(cwd, startedAfterMs) : undefined;
+      await operations.run(["pane", "run", paneId, ...buildJcodeLaunchCommand(jcodeArgs), "run", prompt]);
+      return;
     } catch (error) {
       const paneBusy = herdrErrorCode(error) === "pane_not_ready" || herdrErrorCode(error) === "agent_pane_busy";
       if (!paneBusy || attempt === maxAttempts) throw error;
@@ -1523,11 +1520,13 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
         },
         rename: (agent) => paneRename(agent.paneId, makePaneTitle(agent.role, agent.task)),
         start: async (agent) => {
+          const prompt = buildPrompt(agent.role, agent.task);
           const started = await startPreferredSubagentAgent(
             agent.paneId,
             agent.agentName,
             buildJcodeArgs(agent.cwd, agent.model ?? defaultJcodeModel),
             buildPiArgs(agent.sessionPath, agent.model, agent.thinking),
+            prompt,
           );
           agent.command = started.command;
           agent.agentKind = started.kind;
@@ -1535,9 +1534,11 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           agent.jcodeSessionPath = started.jcodeSessionPath;
           agent.jcodeFallbackReason = started.fallbackReason;
         },
-        prompt: (agent) => agent.promptMode === "raw-pane"
-          ? panePrompt(agent.paneId, buildPrompt(agent.role, agent.task))
-          : agentPrompt(agent.agentName, buildPrompt(agent.role, agent.task)),
+        prompt: (agent) => agent.promptMode === "raw-pane-run"
+          ? Promise.resolve()
+          : agent.promptMode === "raw-pane"
+            ? panePrompt(agent.paneId, buildPrompt(agent.role, agent.task))
+            : agentPrompt(agent.agentName, buildPrompt(agent.role, agent.task)),
         close: paneClose,
         async listPaneIds() {
           return new Set((await listPanes()).map((pane) => pane.pane_id));
@@ -1703,9 +1704,12 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
 
       const timeoutMs = params.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
       const lines = params.lines ?? DEFAULT_LINES;
-      const collectGraceMs = params.wait ? Math.min(30000, timeoutMs) : 0;
+      const collectGraceMs = params.wait ? timeoutMs : 0;
       if (params.wait) {
-        await waitForAgents(targetAgents.map((agent) => agent.paneId), timeoutMs);
+        const agentWaitPaneIds = targetAgents
+          .filter((agent) => agent.promptMode !== "raw-pane-run")
+          .map((agent) => agent.paneId);
+        if (agentWaitPaneIds.length > 0) await waitForAgents(agentWaitPaneIds, timeoutMs);
       }
 
       const panes = await listPanes();
