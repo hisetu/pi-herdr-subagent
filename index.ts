@@ -714,7 +714,7 @@ async function startRawJcodeAgent(
   }
 }
 
-async function findLatestJcodeSessionPath(cwd: string, startedAfterMs: number): Promise<string | undefined> {
+async function findLatestJcodeSessionPath(cwd: string, startedAfterMs: number, promptNeedle?: string): Promise<string | undefined> {
   const sessionsDir = join(process.env.JCODE_HOME ?? join(process.env.HOME ?? "", ".jcode"), "sessions");
   try {
     const entries = await fs.readdir(sessionsDir);
@@ -730,7 +730,9 @@ async function findLatestJcodeSessionPath(cwd: string, startedAfterMs: number): 
       .filter((candidate) => candidate.mtimeMs >= startedAfterMs)
       .sort((a, b) => b.mtimeMs - a.mtimeMs)) {
       const raw = await fs.readFile(candidate.path, "utf8").catch(() => "");
-      if (raw.includes(`Working directory: ${cwd}`)) return candidate.path;
+      if (!raw.includes(`Working directory: ${cwd}`)) continue;
+      if (promptNeedle && !raw.includes(promptNeedle)) continue;
+      return candidate.path;
     }
   } catch {
     return undefined;
@@ -1288,8 +1290,11 @@ async function readCollectedOutput(
   graceMs = 0,
 ): Promise<{ output: string; source: CollectSource }> {
   const tryRead = async (): Promise<{ output: string; source: CollectSource }> => {
-    const jcodeSessionText = agent.promptMode === "raw-pane" && agent.jcodeSessionPath
-      ? await extractAssistantTextFromJcodeSession(agent.jcodeSessionPath)
+    const jcodeSessionPath = agent.promptMode === "raw-pane"
+      ? agent.jcodeSessionPath ?? await findLatestJcodeSessionPath(agent.cwd, agent.createdAt - 1000, agent.task)
+      : undefined;
+    const jcodeSessionText = jcodeSessionPath
+      ? await extractAssistantTextFromJcodeSession(jcodeSessionPath)
       : undefined;
     if (jcodeSessionText) return { output: jcodeSessionText, source: "session" };
 
