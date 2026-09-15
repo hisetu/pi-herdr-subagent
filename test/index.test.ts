@@ -235,8 +235,11 @@ describe("payload, quoting, title, and CLI argument helpers", () => {
     assert.equal(preferred.kind, "jcode");
     assert.equal(preferred.promptMode, "raw-pane");
     assert.equal(preferred.fallbackReason, undefined);
-    assert.equal(directCalls.length, 1);
+    assert.equal(directCalls.length, 2);
     assert.deepEqual(directCalls[0], ["pane", "run", "pane-1", "jcode", "--no-update", "-C", "/repo"]);
+    assert.deepEqual(directCalls[1], [
+      "pane", "wait-output", "--match", "1>", "--source", "recent", "--lines", "120", "--timeout", "30000", "pane-1",
+    ]);
 
     const fallbackCalls: string[][] = [];
     const fallback = await startPreferredSubagentAgent("pane-1", "agent-1", ["--no-update", "-C", "/repo"], ["--session", "session.jsonl"], {

@@ -719,6 +719,7 @@ async function startRawJcodeAgent(
     try {
       await operations.run(["pane", "run", paneId, ...buildJcodeLaunchCommand(jcodeArgs)]);
       await waitForPaneAgentKind(paneId, "jcode", 10000, operations);
+      await waitForPaneText(paneId, "1>", 30000, operations);
       return cwd ? await findLatestJcodeSessionPath(cwd, startedAfterMs) : undefined;
     } catch (error) {
       const paneBusy = herdrErrorCode(error) === "pane_not_ready" || herdrErrorCode(error) === "agent_pane_busy";
@@ -752,6 +753,27 @@ async function findLatestJcodeSessionPath(cwd: string, startedAfterMs: number, p
     return undefined;
   }
   return undefined;
+}
+
+async function waitForPaneText(
+  paneId: string,
+  text: string,
+  timeoutMs: number,
+  operations: Pick<AgentStartOperations, "run"> = defaultAgentStartOperations,
+): Promise<void> {
+  await operations.run([
+    "pane",
+    "wait-output",
+    "--match",
+    text,
+    "--source",
+    "recent",
+    "--lines",
+    "120",
+    "--timeout",
+    String(timeoutMs),
+    paneId,
+  ]);
 }
 
 async function waitForPaneAgentKind(
