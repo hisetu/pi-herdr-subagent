@@ -35,6 +35,7 @@ type SubagentPane = {
   batchId: string;
   supervisorPaneId: string;
   sessionPath?: string;
+  jcodeSessionPath?: string;
   agentName?: string;
   model?: string;
   thinking?: Thinking;
@@ -377,6 +378,7 @@ type StartedSubagentAgent = {
   command: string;
   promptMode: "herdr-agent" | "raw-pane";
   fallbackReason?: string;
+  jcodeSessionPath?: string;
 };
 
 type SpawnTransactionOperations = {
@@ -658,12 +660,13 @@ async function startPreferredSubagentAgent(
 ): Promise<StartedSubagentAgent> {
   let jcodeError: unknown;
   try {
-    await startRawJcodeAgent(paneId, jcodeArgs, operations);
+    const jcodeSessionPath = await startRawJcodeAgent(paneId, jcodeArgs, operations);
     return {
       kind: "jcode",
       args: jcodeArgs,
       command: ["jcode", ...jcodeArgs].map(shellQuote).join(" "),
       promptMode: "raw-pane",
+      jcodeSessionPath,
     };
   } catch (error) {
     jcodeError = error;
@@ -690,7 +693,9 @@ async function startRawJcodeAgent(
   paneId: string,
   jcodeArgs: string[],
   operations: AgentStartOperations = defaultAgentStartOperations,
-): Promise<void> {
+): Promise<string | undefined> {
+  const cwd = jcodeArgs[jcodeArgs.indexOf("-C") + 1];
+  const startedAfterMs = Date.now() - 1000;
   const maxAttempts = operations.maxAttempts ?? 40;
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
     throw new Error("startRawJcodeAgent maxAttempts must be a positive integer.");
@@ -700,13 +705,37 @@ async function startRawJcodeAgent(
     try {
       await operations.run(["pane", "run", paneId, "jcode", ...jcodeArgs]);
       await waitForPaneAgentKind(paneId, "jcode", 10000, operations);
-      return;
+      return cwd ? await findLatestJcodeSessionPath(cwd, startedAfterMs) : undefined;
     } catch (error) {
       const paneBusy = herdrErrorCode(error) === "pane_not_ready" || herdrErrorCode(error) === "agent_pane_busy";
       if (!paneBusy || attempt === maxAttempts) throw error;
       await operations.sleep(100);
     }
   }
+}
+
+async function findLatestJcodeSessionPath(cwd: string, startedAfterMs: number): Promise<string | undefined> {
+  const sessionsDir = join(process.env.JCODE_HOME ?? join(process.env.HOME ?? "", ".jcode"), "sessions");
+  try {
+    const entries = await fs.readdir(sessionsDir);
+    const candidates = await Promise.all(entries
+      .filter((entry) => entry.endsWith(".json"))
+      .map(async (entry) => {
+        const path = join(sessionsDir, entry);
+        const stat = await fs.stat(path);
+        return { path, mtimeMs: stat.mtimeMs };
+      }));
+
+    for (const candidate of candidates
+      .filter((candidate) => candidate.mtimeMs >= startedAfterMs)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)) {
+      const raw = await fs.readFile(candidate.path, "utf8").catch(() => "");
+      if (raw.includes(`Working directory: ${cwd}`)) return candidate.path;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
 }
 
 async function waitForPaneAgentKind(
@@ -877,7 +906,7 @@ function extractStructuredSections(role: Role, text: string): Partial<Record<str
 
 function extractErrorSummary(text: string): string | undefined {
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const match = lines.find((line) => /^(error:|api_error\b|authenticationerror\b|incorrect api key provided\b)/i.test(line));
+  const match = lines.find((line) => /^(error:|api_error\b|authenticationerror\b|incorrect api key provided\b|.*copilot api error\b|.*api error\b|.*model_not_available\b)/i.test(line));
   if (!match) return undefined;
   const normalized = match.replace(/^error:\s*/i, "");
   return `Error: ${normalized}`;
@@ -1187,6 +1216,36 @@ async function extractAssistantTextFromSession(sessionPath: string): Promise<str
   return undefined;
 }
 
+async function extractAssistantTextFromJcodeSession(sessionPath: string): Promise<string | undefined> {
+  try {
+    const raw = await fs.readFile(sessionPath, "utf8");
+    const parsed = JSON.parse(raw) as {
+      messages?: Array<{
+        role?: string;
+        content?: Array<{ type?: string; text?: string }>;
+        error?: unknown;
+        errorMessage?: string;
+      }>;
+    };
+    const messages = parsed.messages ?? [];
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (message.role !== "assistant") continue;
+      const text = (message.content ?? [])
+        .filter((part) => part?.type === "text" && typeof part.text === "string")
+        .map((part) => part.text ?? "")
+        .join("\n")
+        .trim();
+      if (text) return text;
+      if (message.errorMessage) return `Error: ${message.errorMessage}`;
+      if (message.error) return `Error: ${JSON.stringify(message.error)}`;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 async function waitForAgents(
   targetPaneIds: string[],
   timeoutMs: number,
@@ -1229,6 +1288,11 @@ async function readCollectedOutput(
   graceMs = 0,
 ): Promise<{ output: string; source: CollectSource }> {
   const tryRead = async (): Promise<{ output: string; source: CollectSource }> => {
+    const jcodeSessionText = agent.promptMode === "raw-pane" && agent.jcodeSessionPath
+      ? await extractAssistantTextFromJcodeSession(agent.jcodeSessionPath)
+      : undefined;
+    if (jcodeSessionText) return { output: jcodeSessionText, source: "session" };
+
     const sessionText = agent.sessionPath ? await extractAssistantTextFromSession(agent.sessionPath) : undefined;
     if (sessionText) return { output: sessionText, source: "session" };
 
@@ -1426,6 +1490,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           agent.command = started.command;
           agent.agentKind = started.kind;
           agent.promptMode = started.promptMode;
+          agent.jcodeSessionPath = started.jcodeSessionPath;
           agent.jcodeFallbackReason = started.fallbackReason;
         },
         prompt: (agent) => agent.promptMode === "raw-pane"
@@ -1455,6 +1520,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           agent.agentKind ? `  agent kind: ${agent.agentKind}` : undefined,
           agent.promptMode ? `  prompt mode: ${agent.promptMode}` : undefined,
           agent.command ? `  command: ${agent.command}` : undefined,
+          agent.jcodeSessionPath ? `  jcode session: ${agent.jcodeSessionPath}` : undefined,
           agent.jcodeFallbackReason ? `  jcode startup failed; fallback reason: ${agent.jcodeFallbackReason}` : undefined,
         ].filter((line): line is string => Boolean(line))),
       ].join("\n");
