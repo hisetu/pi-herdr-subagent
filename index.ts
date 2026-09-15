@@ -580,6 +580,20 @@ function buildJcodeArgs(cwd: string, model?: string): string[] {
   return args;
 }
 
+function buildJcodeLaunchCommand(jcodeArgs: string[]): string[] {
+  const provider = valueAfterArg(jcodeArgs, "--provider");
+  const model = valueAfterArg(jcodeArgs, "--model");
+  if (provider === "copilot" && model) {
+    return ["env", `JCODE_COPILOT_MODEL=${model}`, "jcode", ...jcodeArgs];
+  }
+  return ["jcode", ...jcodeArgs];
+}
+
+function valueAfterArg(args: string[], name: string): string | undefined {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : undefined;
+}
+
 function parseProviderModel(model: string | undefined): { provider?: string; model: string } | undefined {
   const trimmed = model?.trim();
   if (!trimmed) return undefined;
@@ -664,7 +678,7 @@ async function startPreferredSubagentAgent(
     return {
       kind: "jcode",
       args: jcodeArgs,
-      command: ["jcode", ...jcodeArgs].map(shellQuote).join(" "),
+      command: buildJcodeLaunchCommand(jcodeArgs).map(shellQuote).join(" "),
       promptMode: "raw-pane",
       jcodeSessionPath,
     };
@@ -703,7 +717,7 @@ async function startRawJcodeAgent(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      await operations.run(["pane", "run", paneId, "jcode", ...jcodeArgs]);
+      await operations.run(["pane", "run", paneId, ...buildJcodeLaunchCommand(jcodeArgs)]);
       await waitForPaneAgentKind(paneId, "jcode", 10000, operations);
       return cwd ? await findLatestJcodeSessionPath(cwd, startedAfterMs) : undefined;
     } catch (error) {
@@ -1325,6 +1339,7 @@ export const __test = {
   normalizeSpawnTasks,
   validateRequestedModels,
   buildJcodeArgs,
+  buildJcodeLaunchCommand,
   buildPrompt,
   encodeNotifyPayload,
   decodeNotifyPayload,
@@ -1469,7 +1484,7 @@ export default function herdrSubagentsExtension(pi: ExtensionAPI) {
           const sessionPath = makeSessionPath();
           await fs.mkdir(dirname(sessionPath), { recursive: true });
           const agentName = makeAgentName(item.role, index, batchId);
-          const command = ["jcode", ...buildJcodeArgs(cwd, item.model ?? defaultJcodeModel)].map(shellQuote).join(" ");
+          const command = buildJcodeLaunchCommand(buildJcodeArgs(cwd, item.model ?? defaultJcodeModel)).map(shellQuote).join(" ");
           return {
             role: item.role,
             task: item.task,

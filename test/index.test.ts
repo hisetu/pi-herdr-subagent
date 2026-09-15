@@ -15,6 +15,7 @@ const {
   makePaneTitle,
   buildPiArgs,
   buildJcodeArgs,
+  buildJcodeLaunchCommand,
   extractStructuredSections,
   extractStructuredSummary,
   extractTaskLine,
@@ -136,6 +137,9 @@ describe("payload, quoting, title, and CLI argument helpers", () => {
     assert.deepEqual(buildJcodeArgs("/repo path"), ["--no-update", "-C", "/repo path"]);
     assert.deepEqual(buildJcodeArgs("/repo", "github-copilot/gpt-5.5"), [
       "--no-update", "-C", "/repo", "--provider", "copilot", "--model", "gpt-5.5",
+    ]);
+    assert.deepEqual(buildJcodeLaunchCommand(buildJcodeArgs("/repo", "github-copilot/gpt-5.5")), [
+      "env", "JCODE_COPILOT_MODEL=gpt-5.5", "jcode", "--no-update", "-C", "/repo", "--provider", "copilot", "--model", "gpt-5.5",
     ]);
   });
 
